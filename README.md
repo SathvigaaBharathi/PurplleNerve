@@ -1,68 +1,127 @@
-# Store Intelligence API
+# 🔮 PurplleNerve: Real-Time Store Intelligence & Telemetry
 
-## Setup (5 commands)
+PurplleNerve is a premium, end-to-end Store Intelligence system designed to ingest, process, and analyze raw anonymous CCTV footages from physical retail stores. Using state-of-the-art computer vision models, it tracks visitor behavior, classifies staff, identifies queue bottlenecks, and streams real-time telemetry straight to a high-fidelity visual dashboard.
+
+---
+
+## 🚀 Key Features
+
+*   **Dual Object Detection Architecture**: 
+    *   **YOLOv9s** for Entry and Floor camera views to achieve optimal speed/accuracy trade-off.
+    *   **RT-DETR (ResNet50)** for Billing/POS camera zones to track checkout queues and resolve complex occlusions.
+*   **Appearance-based Re-ID**: Stable visual embeddings matching visitors across entry/exit restarts.
+*   **Spatial Deduplication (Cross-Camera Homography)**: Seamlessly merges overlapping field-of-views to prevent duplicate visitor counts.
+*   **Staff Filtering**: Automatic hue classification to exclude staff members wearing uniform from conversion metrics.
+*   **Structured Real-Time API**: Highly idempotent ingestion, anomaly detection, and conversion funnel pipelines.
+*   **Live Telemetry Dashboard**: Responsive UI with interactive heatmap blueprints, Server-Sent Events (SSE), and metrics charts.
+
+---
+
+## 🛠️ System Architecture
+
+```mermaid
+graph TD
+    cctv[Raw CCTV Clips] --> pipeline[pipeline.detect]
+    pipeline --> yolo[YOLOv9s Model]
+    pipeline --> rtdetr[RT-DETR Model]
+    yolo --> tracker[SimpleIoUTracker]
+    rtdetr --> tracker
+    tracker --> staff[Uniform Hue Classifier]
+    tracker --> reid[Appearance Re-ID Model]
+    tracker --> dedup[Spatial Cross-Camera Homography]
+    staff --> emitter[EventEmitter]
+    reid --> emitter
+    dedup --> emitter
+    emitter --> api[FastAPI API Server]
+    api --> db[(PostgreSQL Database)]
+    api --> redis[(Redis Broker Cache)]
+    api --> sse[Server-Sent Events Stream]
+    sse --> dashboard[Live Dashboard UI]
+```
+
+---
+
+## 🔌 Quick Start (5 Command Setup)
+
+### Option 1: Docker (Containerized)
 
 ```bash
-git clone <repo-url> && cd store-intelligence
-cp .env.example .env                          # edit DATABASE_URL / REDIS_URL if needed
-docker compose up -d postgres redis api       # starts API on :8000
+# 1. Clone the project and configure environment
+git clone https://github.com/SathvigaaBharathi/PurplleNerve.git && cd PurplleNerve
+cp .env.example .env
+
+# 2. Spin up API, database, and Redis cache services
+docker compose up -d postgres redis api
+
+# 3. Run the ML pipeline on a sample CCTV clip
 docker compose run pipeline python pipeline/detect.py \
-  --clip /clips/STORE_BLR_002_entry.mp4 \
+  --clip /clips/CAM 1.mp4 \
   --store-id STORE_BLR_002 \
   --layout /data/store_layout.json \
-  --output /output/events.jsonl               # run detection on a clip
-curl -X POST http://localhost:8000/events/ingest \
-  -H "Content-Type: application/json" \
-  -d @output/events.jsonl                     # feed events to API
+  --output /output/events.jsonl \
+  --api-url http://api:8000 \
+  --real
+
+# 4. Spin up mock transaction data & POS integration
+curl -X POST http://localhost:8000/pos/load
+
+# 5. Open the Live Dashboard
+# Open http://localhost:8000/dashboard in your browser!
 ```
 
-## Run All Clips at Once
+### Option 2: Native Run (Windows PowerShell)
+
+```powershell
+# 1. Run local FastAPI / Uvicorn server
+$env:DATABASE_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/retail_intelligence"; $env:REDIS_URL="redis://localhost:6379"; python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 2. Run the detection pipeline on camera feeds (example: CAM 1)
+$env:DATABASE_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/retail_intelligence"; python -m pipeline.detect --clip "CCTV Footage\CAM 1.mp4" --store-id STORE_BLR_002 --layout data/store_layout.json --output output/events_blr_cam1.jsonl --api-url http://127.0.0.1:8000 --real --loop --conf-threshold 0.50
+```
+
+---
+
+## 📈 Analytics API Endpoints
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/events/ingest` | Ingest CV events (safe, idempotent, bulk insertion) |
+| `GET` | `/stores/{id}/metrics` | Live occupancy, conversion rate, queue depth, quality score |
+| `GET` | `/stores/{id}/stream` | Server-Sent Events (SSE) telemetry feed (push frequency: 2s) |
+| `GET` | `/stores/{id}/funnel` | Entry → Zone Visit → Checkout Queue → Purchase funnel data |
+| `GET` | `/stores/{id}/heatmap` | Dynamic zone visit counts and dwell metrics |
+| `GET` | `/stores/{id}/anomalies` | Active queue congestion and off-hours intrusion alerts |
+| `GET` | `/health` | Ingestion latency, database status, and stale feed alerts |
+| `POST` | `/pos/load` | Load POS transaction CSV to correlate buyer conversion |
+
+---
+
+## 📊 Live Dashboard Interface
+
+Open **[http://localhost:8000/dashboard](http://localhost:8000/dashboard)** to inspect:
+*   **KPI Cards**: Live occupancy, conversion rates, check-out queue depth, and data quality metrics.
+*   **Real-time Chart**: Auto-scrolling telemetry trend comparing unique visitors with checkout queue sizes.
+*   **Store Floor Layout blueprint**: High-fidelity SVG floor map rendering color-coded, real-time dwell hot-spots.
+*   **Purchase Funnel**: Progressive drop-off funnel showing conversion rates from entrance to purchase.
+*   **Live Events Ticker**: Infinite scrolling list of raw CV events processed from edge camera feeds.
+
+---
+
+## 🧪 Testing and Coverage
+
+The test suite covers DB models, SSE streaming, metrics calculation, anomalies, and pipeline components.
 
 ```bash
-bash pipeline/run.sh /clips /data/store_layout.json
+# Run pytest with coverage report (target: >70% statement coverage)
+pytest --cov=app --cov-report=term-missing
 ```
 
-This processes all 5 stores × 3 camera angles and streams events into the API automatically.
+---
 
-## Live Dashboard (Part E)
+## ⚙️ Environment Config
 
-Open **http://localhost:8000/dashboard** in your browser.
+Copy `.env.example` to `.env` and adjust the variables:
 
-The dashboard connects to the API via Server-Sent Events (SSE) and updates in real time as
-events flow from the detection pipeline. Metrics, anomalies, zone heatmaps and the conversion
-funnel refresh every 2 seconds without page reload.
-
-## API Endpoints
-
-| Endpoint | Description |
-|---|---|
-| `POST /events/ingest` | Ingest detection events (idempotent by event_id) |
-| `GET /stores/{id}/metrics` | Live visitor count, conversion rate, dwell, queue depth |
-| `GET /stores/{id}/funnel` | Entry → Zone → Billing → Purchase funnel with drop-off % |
-| `GET /stores/{id}/heatmap` | Zone visit frequency + avg dwell, normalised 0–100 |
-| `GET /stores/{id}/anomalies` | Active anomalies with severity and suggested action |
-| `GET /health` | Service status, per-store last event timestamp, STALE_FEED warnings |
-
-## Tests
-
-```bash
-docker compose run api pytest --cov=app --cov-report=term-missing
-```
-
-Statement coverage target: >70%.
-
-## Health Check
-
-```bash
-curl http://localhost:8000/health
-```
-
-## Environment Variables
-
-Copy `.env.example` to `.env`. Key variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://retail:retail_secret@postgres:5432/retail_intelligence` | PostgreSQL async connection string |
-| `REDIS_URL` | `redis://redis:6379` | Redis connection string |
-| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`) |
+*   `DATABASE_URL`: Connection string for Postgres database.
+*   `REDIS_URL`: Connection string for Redis broker.
+*   `LOG_LEVEL`: Logging output granularity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).

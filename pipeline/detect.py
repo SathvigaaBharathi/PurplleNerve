@@ -268,8 +268,8 @@ async def process_clip(
             continue
 
         if real:
-            # We simulate time based on current frame index in video
-            curr_ts = start_time + timedelta(seconds=(frame_idx / fps))
+            # For real-time live streaming, use the current wall-clock time
+            curr_ts = datetime.now(timezone.utc)
             
             # --- Perform Track & Detection Inferences ---
             detections = []
