@@ -43,12 +43,12 @@ async def compute_funnel_data(store_id: str, db: AsyncSession) -> dict:
         # Stage 1: "Entry" - count of unique visitor_ids with any ENTRY today
         entry_visitors = {e.visitor_id for e in events if e.event_type == "ENTRY"}
         
-        # Stage 2: "Zone visit" - visitors who have >= 1 ZONE_ENTER event in any non-billing zone today
+        # Stage 2: "Zone visit" - visitors who have >= 1 ZONE_ENTER or ZONE_DWELL event in any non-billing zone today
         # Non-billing zones are zones that are not billing (BILLING, BILLING_COUNTER, CASHIER)
         non_billing_zones = {"BILLING", "BILLING_COUNTER", "CASHIER"}
         zone_visit_visitors = {
             e.visitor_id for e in events 
-            if e.event_type == "ZONE_ENTER" and e.zone_id and e.zone_id.upper() not in non_billing_zones
+            if e.event_type in ("ZONE_ENTER", "ZONE_DWELL") and e.zone_id and e.zone_id.upper() not in non_billing_zones
         }
         # In a real funnel, we might expect Stage 2 visitors to be a subset of Stage 1, 
         # but to make it a clean funnel, let's intersect it with Entry visitors 
