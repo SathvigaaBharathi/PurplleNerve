@@ -1,0 +1,15 @@
+{
+  "frames_tested": 60,
+  "yolov9s": {
+    "mean_latency_ms": 365.7,
+    "p95_latency_ms": 505.8,
+    "total_persons_detected": 123,
+    "frames_with_zero_detections": 0
+  },
+  "rtdetr_r50vd": {
+    "mean_latency_ms": 2204.7,
+    "p95_latency_ms": 3160.0,
+    "total_persons_detected": 326,
+    "frames_with_zero_detections": 0
+  }
+}

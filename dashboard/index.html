@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apex Retail Nerve Center</title>
+  
+  <!-- Modern Fonts and Styling -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/dashboard/styles.css">
+
+  <!-- React & Babel CDNs -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React Component Execution -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+ 
+    function App() {
+      const [storeId, setStoreId] = useState("STORE_BLR_002");
+      const [data, setData] = useState({
+        metrics: {
+          unique_visitors: 0,
+          conversion_rate: 0.0,
+          avg_dwell_per_zone: {},
+          queue_depth: 0,
+          abandonment_rate: 0.0,
+          data_quality_score: null,
+          low_confidence_event_pct: 0.0
+        },
+        funnel: {
+          funnel: [
+            { stage: "Entry", visitors: 0, dropoff_pct: 0.0 },
+            { stage: "Zone visit", visitors: 0, dropoff_pct: 0.0 },
+            { stage: "Billing queue", visitors: 0, dropoff_pct: 0.0 },
+            { stage: "Purchase", visitors: 0, dropoff_pct: 0.0 }
+          ]
+        },
+        anomalies: {
+          active_anomalies: []
+        }
+      });
+
+      const [dismissedAlerts, setDismissedAlerts] = useState({});
+      const [isConnected, setIsConnected] = useState(false);
+      
+      // Events Feed Management
+      const [eventsList, setEventsList] = useState([]);
+      const [isFeedPaused, setIsFeedPaused] = useState(false);
+      const [feedFilter, setFeedFilter] = useState("ALL"); // ALL, ENTRY, FLOOR, QUEUE, STAFF
+      
+      // Chart History
+      const [history, setHistory] = useState([]);
+      
+      // Interactive Tooltip Position
+      const [tooltipData, setTooltipData] = useState(null);
+      const [selectedZone, setSelectedZone] = useState(null);
+      
+      const eventSourceRef = useRef(null);
+      const svgRef = useRef(null);
+
+      // Connect to SSE Endpoint with Auto-Reconnection
+      useEffect(() => {
+        let es = null;
+        let retryTimeout = null;
+
+        const connect = () => {
+          setIsConnected(false);
+          if (es) {
+            es.close();
+          }
+
+          const streamUrl = `/stores/${storeId}/stream`;
+          console.log(`Connecting to stream: ${streamUrl}`);
+          
+          es = new EventSource(streamUrl);
+          eventSourceRef.current = es;
+
+          es.onopen = () => {
+            console.log("SSE Stream connected successfully");
+            setIsConnected(true);
+          };
+
+          es.onmessage = (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              if (payload.error) {
+                console.error("Error from SSE stream:", payload.message);
+                return;
+              }
+              
+              const metrics = payload.metrics || {};
+              setData({
+                metrics: metrics,
+                funnel: payload.funnel || { funnel: [] },
+                anomalies: payload.anomalies || { active_anomalies: [] }
+              });
+
+              // Append to chart history with 15 point scrolling limit
+              setHistory(prev => {
+                const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                
+                // Skip duplicate timestamps
+                if (prev.length > 0 && prev[prev.length - 1].time === nowStr) {
+                  return prev;
+                }
+                const newPoint = {
+                  visitors: metrics.unique_visitors || 0,
+                  queue: metrics.queue_depth || 0,
+                  time: nowStr
+                };
+                const next = [...prev, newPoint];
+                return next.length > 15 ? next.slice(next.length - 15) : next;
+              });
+
+            } catch (e) {
+              console.error("Failed to parse SSE payload:", e);
+            }
+          };
+
+          es.onerror = (err) => {
+            console.error("SSE Stream connection error, retrying in 3s...", err);
+            setIsConnected(false);
+            es.close();
+            retryTimeout = setTimeout(connect, 3000);
+          };
+        };
+
+        connect();
+
+        return () => {
+          if (es) {
+            es.close();
+          }
+          if (retryTimeout) {
+            clearTimeout(retryTimeout);
+          }
+        };
+      }, [storeId]);
+
+      // Polling recent events and merging to state for infinite scrolling experience
+      const fetchRecentEvents = async () => {
+        if (isFeedPaused) return; // Freeze feed update if operator paused it
+        
+        try {
+          const res = await fetch(`/stores/${storeId}/events`);
+          const json = await res.json();
+          if (Array.isArray(json)) {
+            setEventsList(prev => {
+              // Create unique map of event items
+              const map = new Map();
+              prev.forEach(item => map.set(item.event_id, item));
+              json.forEach(item => map.set(item.event_id, item));
+              
+              // Convert to array and sort descending by timestamp
+              const merged = Array.from(map.values());
+              merged.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+              
+              // Cap at 30 items
+              return merged.slice(0, 30);
+            });
+          }
+        } catch (e) {
+          console.error("Failed to fetch recent events:", e);
+        }
+      };
+
+      useEffect(() => {
+        // Run initial pull
+        fetchRecentEvents();
+        const t = setInterval(fetchRecentEvents, 2000);
+        return () => clearInterval(t);
+      }, [storeId, isFeedPaused]);
+
+      const queueVal = data.metrics.queue_depth || 0;
+      
+      // Purple gauge scale color
+      let gaugeColor = "#ba75ff"; // Light lavender purple
+      if (queueVal >= 8) gaugeColor = "#e11d48"; // Critical rose red
+      else if (queueVal >= 4) gaugeColor = "#c026d3"; // Congested magenta
+
+      const activeAlerts = (data.anomalies.active_anomalies || []).filter(
+        alert => !dismissedAlerts[alert.anomaly_id]
+      );
+      const latestAlert = activeAlerts.length > 0 ? activeAlerts[0] : null;
+
+      const dismissAlert = (id) => {
+        setDismissedAlerts(prev => ({ ...prev, [id]: true }));
+      };
+
+      const formatDwellTime = (ms) => {
+        if (!ms) return "0s";
+        const seconds = Math.floor((ms / 1000) % 60);
+        const minutes = Math.floor(ms / 60000);
+        if (minutes > 0) return `${minutes}m ${seconds}s`;
+        return `${seconds}s`;
+      };
+
+      // Filter events by selected chip
+      const filteredEvents = eventsList.filter(ev => {
+        if (feedFilter === "ALL") return true;
+        if (feedFilter === "ENTRY") return ev.event_type === "ENTRY" || ev.event_type === "EXIT";
+        if (feedFilter === "FLOOR") return ev.event_type.startsWith("ZONE_");
+        if (feedFilter === "QUEUE") return ev.event_type.startsWith("BILLING_QUEUE_");
+        if (feedFilter === "STAFF") return ev.is_staff === true;
+        return true;
+      });
+
+      // SVG mouse hover coordinate mapping for the chart
+      const handleChartMouseMove = (e) => {
+        if (history.length < 2 || !svgRef.current) return;
+        
+        const svgRect = svgRef.current.getBoundingClientRect();
+        const mouseX = e.clientX - svgRect.left;
+        
+        const width = 600;
+        const padding = 20;
+        const graphWidth = width - 2 * padding;
+        
+        // Map mouseX to historical point index
+        const relativeX = (mouseX / svgRect.width) * width;
+        let index = Math.round(((relativeX - padding) / graphWidth) * (history.length - 1));
+        index = Math.max(0, Math.min(history.length - 1, index));
+        
+        const activePoint = history[index];
+        
+        // Calculate coordinates for tooltip display
+        const getXCoord = (idx) => padding + (idx / (history.length - 1)) * graphWidth;
+        const xPosPercent = (getXCoord(index) / width) * 100;
+        
+        setTooltipData({
+          point: activePoint,
+          xPosPercent: xPosPercent,
+          left: e.clientX - svgRect.left,
+          top: e.clientY - svgRect.top
+        });
+      };
+
+      const handleChartMouseLeave = () => {
+        setTooltipData(null);
+      };
+
+      // Native SVG Chart Generator (Filled Area)
+      const renderTrendChart = () => {
+        if (history.length < 2) {
+          return (
+            <div className="glass-panel chart-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '220px', color: 'var(--text-muted)' }}>
+              <span>Streaming telemetry... Starting background computer vision pipeline</span>
+            </div>
+          );
+        }
+
+        const maxVal = Math.max(10, ...history.map(h => Math.max(h.visitors, h.queue))) * 1.2;
+        const width = 600;
+        const height = 150;
+        const padding = 20;
+
+        const getX = (idx) => padding + (idx / (history.length - 1)) * (width - 2 * padding);
+        const getY = (val) => height - padding - (val / maxVal) * (height - 2 * padding);
+
+        // Path generators
+        let vLine = `M ${getX(0)} ${getY(history[0].visitors)}`;
+        let qLine = `M ${getX(0)} ${getY(history[0].queue)}`;
+        
+        for (let i = 1; i < history.length; i++) {
+          vLine += ` L ${getX(i)} ${getY(history[i].visitors)}`;
+          qLine += ` L ${getX(i)} ${getY(history[i].queue)}`;
+        }
+
+        // Fill area paths
+        const vArea = `${vLine} L ${getX(history.length - 1)} ${height - padding} L ${getX(0)} ${height - padding} Z`;
+        const qArea = `${qLine} L ${getX(history.length - 1)} ${height - padding} L ${getX(0)} ${height - padding} Z`;
+
+        return (
+          <div className="glass-panel chart-container">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                  Real-time Store Traffic Trends
+                </h3>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Live unique store occupancy vs check-out queues</p>
+              </div>
+            </div>
+            
+            <div className="chart-svg-wrapper">
+              <svg 
+                ref={svgRef}
+                viewBox={`0 0 ${width} ${height}`} 
+                style={{ width: '100%', height: '100%', overflow: 'visible', cursor: 'crosshair' }}
+                onMouseMove={handleChartMouseMove}
+                onMouseLeave={handleChartMouseLeave}
+              >
+                <defs>
+                  {/* Fills */}
+                  <linearGradient id="vFillGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="var(--purplle-light)" stopOpacity="0.25" />
+                    <stop offset="100%" stopColor="var(--purplle-light)" stopOpacity="0.0" />
+                  </linearGradient>
+                  <linearGradient id="qFillGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="var(--crit-gradient)" stopOpacity="0.15" />
+                    <stop offset="100%" stopColor="var(--crit-gradient)" stopOpacity="0.0" />
+                  </linearGradient>
+                  
+                  {/* Strokes */}
+                  <linearGradient id="vStrokeGrad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor="#fff" />
+                    <stop offset="50%" stopColor="var(--purplle-light)" />
+                    <stop offset="100%" stopColor="#fff" />
+                  </linearGradient>
+                </defs>
+
+                {/* Grid Lines */}
+                {[0, 0.5, 1].map((ratio, i) => {
+                  const yVal = padding + ratio * (height - 2 * padding);
+                  return (
+                    <line 
+                      key={i} 
+                      x1={padding} 
+                      y1={yVal} 
+                      x2={width - padding} 
+                      y2={yVal} 
+                      stroke="rgba(255,255,255,0.04)" 
+                      strokeWidth="1" 
+                    />
+                  );
+                })}
+
+                {/* Shaded Areas */}
+                <path d={vArea} fill="url(#vFillGrad)" />
+                <path d={qArea} fill="url(#qFillGrad)" />
+
+                {/* Lines */}
+                <path d={vLine} fill="none" stroke="url(#vStrokeGrad)" strokeWidth="3" strokeLinecap="round" />
+                <path d={qLine} fill="none" stroke="var(--purplle-light)" strokeWidth="2" strokeDasharray="3 3" strokeLinecap="round" opacity="0.6" />
+
+                {/* Coordinates Circles */}
+                <circle cx={getX(history.length - 1)} cy={getY(history[history.length - 1].visitors)} r="4" fill="#ffffff" stroke="var(--purplle-light)" strokeWidth="2" />
+                <circle cx={getX(history.length - 1)} cy={getY(history[history.length - 1].queue)} r="3" fill="#ffffff" stroke="var(--purplle-primary)" strokeWidth="2" />
+
+                {/* Interactive Tooltip Guide Line */}
+                {tooltipData && (
+                  <line 
+                    x1={getX(history.indexOf(tooltipData.point))} 
+                    y1={padding} 
+                    x2={getX(history.indexOf(tooltipData.point))} 
+                    y2={height - padding} 
+                    stroke="rgba(186, 117, 255, 0.4)" 
+                    strokeWidth="1.5" 
+                    strokeDasharray="2 2"
+                  />
+                )}
+              </svg>
+
+              {/* Float Tooltip */}
+              {tooltipData && (
+                <div 
+                  className="chart-tooltip-box" 
+                  style={{ 
+                    left: `${tooltipData.left}px`,
+                    top: `${tooltipData.top}px`
+                  }}
+                >
+                  <div className="chart-tooltip-time">{tooltipData.point.time}</div>
+                  <div className="chart-tooltip-metric">
+                    <span className="chart-tooltip-dot" style={{ backgroundColor: 'var(--purplle-light)' }}></span>
+                    <span>Occupancy: <strong>{tooltipData.point.visitors}</strong></span>
+                  </div>
+                  <div className="chart-tooltip-metric">
+                    <span className="chart-tooltip-dot" style={{ backgroundColor: 'var(--purplle-primary)' }}></span>
+                    <span>Queue Count: <strong>{tooltipData.point.queue}</strong></span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '2rem', marginTop: '1.25rem', fontSize: '0.8rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <span style={{ width: '10px', height: '10px', backgroundColor: 'var(--purplle-light)', borderRadius: '2px' }}></span>
+                <span style={{ color: 'var(--text-secondary)' }}>Total Unique Visitors ({history[history.length-1].visitors})</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <span style={{ width: '10px', height: '1.5px', borderTop: '2px dashed var(--purplle-light)', borderRadius: '2px', opacity: 0.7 }}></span>
+                <span style={{ color: 'var(--text-secondary)' }}>Checkout Queue Depth ({history[history.length-1].queue})</span>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      // Store floor coordinates config mapping
+      const storeZones = [
+        { id: "ENTRY", label: "Entry Zone", x: 20, y: 40, w: 80, h: 120 },
+        { id: "SKINCARE", label: "Skincare", x: 120, y: 30, w: 110, h: 65 },
+        { id: "MOISTURISER", label: "Moisturiser", x: 120, y: 105, w: 110, h: 65 },
+        { id: "BILLING", label: "Billing / POS", x: 250, y: 40, w: 120, h: 120 }
+      ];
+
+      const getDwellColor = (dwellMs) => {
+        if (!dwellMs) return "rgba(186, 117, 255, 0.05)";
+        const mins = dwellMs / 60000;
+        if (mins > 3.0) return "rgba(225, 29, 72, 0.35)"; // Congested
+        if (mins > 1.0) return "rgba(192, 38, 211, 0.3)";  // Medium
+        return "rgba(139, 92, 246, 0.25)";  // Normal
+      };
+
+      const getDwellStroke = (dwellMs) => {
+        if (!dwellMs) return "rgba(186, 117, 255, 0.2)";
+        const mins = dwellMs / 60000;
+        if (mins > 3.0) return "rgba(225, 29, 72, 0.8)";
+        if (mins > 1.0) return "rgba(192, 38, 211, 0.8)";
+        return "rgba(186, 117, 255, 0.6)";
+      };
+
+      return (
+        <div className="app-container">
+          {/* Top Banner Alert Bar */}
+          {latestAlert && (
+            <div className={`alert-banner ${latestAlert.severity}`}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <strong>[{latestAlert.severity}]</strong>
+                <span>{latestAlert.suggested_action}</span>
+              </div>
+              <button className="alert-close" onClick={() => dismissAlert(latestAlert.anomaly_id)}>×</button>
+            </div>
+          )}
+
+          {/* Sidebar */}
+          <aside className="sidebar">
+            <div className="logo-container" style={{ marginBottom: '2.5rem' }}>
+              <div className="logo-mark">P</div>
+              <div className="logo-text">Purplle<span>Nerve</span></div>
+            </div>
+
+            <div className="store-select-wrapper">
+              <span className="sidebar-label">Active Store</span>
+              <select 
+                className="store-select" 
+                value={storeId} 
+                onChange={(e) => {
+                  setStoreId(e.target.value);
+                  setHistory([]);
+                  setEventsList([]);
+                  setSelectedZone(null);
+                }}
+              >
+                <option value="STORE_BLR_002">STORE_BLR_002 (Bengaluru)</option>
+                <option value="STORE_MUM_001">STORE_MUM_001 (Mumbai)</option>
+                <option value="STORE_DEL_003">STORE_DEL_003 (Delhi)</option>
+              </select>
+            </div>
+
+            {/* Connection Telemetry */}
+            <div style={{ background: 'rgba(186, 117, 255, 0.04)', border: '1px solid var(--border-color)', padding: '1.25rem', borderRadius: '12px', marginBottom: '2rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <span className={`connection-dot ${isConnected ? 'online' : 'offline'}`}></span>
+                <span style={{ fontSize: '0.85rem', fontWeight: 700 }}>
+                  {isConnected ? "Stream Live" : "Connecting Stream..."}
+                </span>
+              </div>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                {isConnected 
+                  ? "SSE stream connected. Detections streaming real-time."
+                  : "Database pool listening. Attempting to restore pipeline link."
+                }
+              </span>
+            </div>
+
+            {/* Infrastructure Details */}
+            <div className="system-status-list">
+              <span className="sidebar-label">Telemetry Stats</span>
+              
+              <div className="status-item">
+                <span className="status-label">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                  Cameras Active
+                </span>
+                <span className="status-val">3 Channels</span>
+              </div>
+              
+              <div className="status-item">
+                <span className="status-label">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                  AI Orchestrator
+                </span>
+                <span className="status-val" style={{ color: 'var(--purplle-light)' }}>YOLOv9s+RT-DETR</span>
+              </div>
+
+              <div className="status-item">
+                <span className="status-label">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+                  Broker & DB
+                </span>
+                <span className="status-val">Redis + Postgres</span>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Dashboard Section */}
+          <main className="main-content">
+            <header>
+              <div>
+                <h1 className="logo-text">Retail Intelligence <span>Nerve System</span></h1>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>Computer vision store occupancy, tracking, and funnel telemetry</p>
+              </div>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.03)', padding: '0.5rem 1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                System Time: {new Date().toLocaleDateString([], { month: 'short', day: 'numeric' })} {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </div>
+            </header>
+
+            <div className="dashboard-grid">
+              {/* Left Analytics Grid */}
+              <div>
+                {/* KPIs Row */}
+                <div className="kpi-row">
+                  {/* Card 1 */}
+                  <div className="glass-panel kpi-card">
+                    <div className="kpi-header">
+                      <span className="kpi-label">Unique Occupancy</span>
+                      <span className="kpi-icon-wrapper">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                      </span>
+                    </div>
+                    <span className="kpi-value">{data.metrics.unique_visitors}</span>
+                  </div>
+
+                  {/* Card 2 */}
+                  <div className="glass-panel kpi-card">
+                    <div className="kpi-header">
+                      <span className="kpi-label">Conversion Rate</span>
+                      <span className="kpi-icon-wrapper">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/></svg>
+                      </span>
+                    </div>
+                    <span className="kpi-value">{(data.metrics.conversion_rate * 100).toFixed(1)}%</span>
+                  </div>
+
+                  {/* Card 3 */}
+                  <div className="glass-panel kpi-card">
+                    <div className="kpi-header">
+                      <span className="kpi-label">Abandonment Rate</span>
+                      <span className="kpi-icon-wrapper">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m15 9-6 6"/><path d="m9 9 6 6"/><circle cx="12" cy="12" r="10"/></svg>
+                      </span>
+                    </div>
+                    <span className="kpi-value">{(data.metrics.abandonment_rate * 100).toFixed(1)}%</span>
+                  </div>
+
+                  {/* Card 4 */}
+                  <div className="glass-panel kpi-card">
+                    <div className="kpi-header">
+                      <span className="kpi-label">Data Confidence</span>
+                      <span className="kpi-icon-wrapper">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                      </span>
+                    </div>
+                    <span className="kpi-value">
+                      {data.metrics.data_quality_score !== null 
+                        ? `${(data.metrics.data_quality_score * 100).toFixed(0)}%` 
+                        : "100%"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Filled Area Chart */}
+                {renderTrendChart()}
+
+                {/* SVG Live Heatmap Floorplan blueprint */}
+                <div className="glass-panel floormap-container">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+                    <div>
+                      <h3 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="M3 9h18"/></svg>
+                        Store Floor Layout Blueprint
+                      </h3>
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Interactive spatial layout scaled by live zone dwell telemetry</p>
+                    </div>
+                    {selectedZone && (
+                      <button 
+                        onClick={() => setSelectedZone(null)} 
+                        style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border-color)', color: '#fff', fontSize: '0.75rem', padding: '0.25rem 0.5rem', borderRadius: '4px', cursor: 'pointer' }}
+                      >
+                        Reset Highlight
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: '1.5rem', alignItems: 'center' }}>
+                    <svg viewBox="0 0 400 200" className="floormap-svg">
+                      <rect x="5" y="5" width="390" height="190" rx="8" fill="none" stroke="rgba(186, 117, 255, 0.15)" strokeWidth="1" />
+                      
+                      {storeZones.map((zone) => {
+                        const dwellTime = data.metrics.avg_dwell_per_zone[zone.id];
+                        const isFocused = selectedZone === zone.id;
+                        
+                        return (
+                          <g key={zone.id} onClick={() => setSelectedZone(zone.id)}>
+                            <rect 
+                              x={zone.x} 
+                              y={zone.y} 
+                              width={zone.w} 
+                              height={zone.h} 
+                              rx="6" 
+                              fill={getDwellColor(dwellTime)}
+                              stroke={isFocused ? "#ffffff" : getDwellStroke(dwellTime)}
+                              strokeWidth={isFocused ? 2.5 : 1.5}
+                              className="store-zone-rect"
+                            />
+                            <text x={zone.x + zone.w / 2} y={zone.y + zone.h / 2 - 2} className="store-zone-label">
+                              {zone.label}
+                            </text>
+                            <text x={zone.x + zone.w / 2} y={zone.y + zone.h / 2 + 10} className="store-zone-value">
+                              {formatDwellTime(dwellTime)}
+                            </text>
+                          </g>
+                        );
+                      })}
+                    </svg>
+
+                    <div>
+                      {selectedZone ? (
+                        <div style={{ background: 'rgba(186, 117, 255, 0.05)', border: '1px solid var(--purplle-light)', padding: '1.25rem', borderRadius: '12px', height: '100%' }}>
+                          <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--purplle-light)', marginBottom: '0.4rem' }}>
+                            {selectedZone} Zone Details
+                          </h4>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.8rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Avg Dwell Time:</span>
+                              <strong style={{ color: '#fff' }}>{formatDwellTime(data.metrics.avg_dwell_per_zone[selectedZone])}</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Status Threshold:</span>
+                              <strong>
+                                {(data.metrics.avg_dwell_per_zone[selectedZone] || 0) / 60000 > 3.0 
+                                  ? <span style={{ color: 'var(--crit-gradient)' }}>High Dwell (Congested)</span>
+                                  : (data.metrics.avg_dwell_per_zone[selectedZone] || 0) / 60000 > 1.0 
+                                    ? <span style={{ color: 'var(--warn-gradient)' }}>Elevated Dwell</span>
+                                    : <span style={{ color: '#10b981' }}>Optimal Dwell</span>
+                                }
+                              </strong>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ border: '1px dashed var(--border-color)', padding: '1.25rem', borderRadius: '12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                          Click a zone in the layout to highlight and inspect dwell stats.
+                        </div>
+                      )}
+
+                      <div className="heatmap-mini-grid">
+                        <div className="heatmap-mini-card">
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Skincare</span>
+                          <strong style={{ fontSize: '0.85rem' }}>{formatDwellTime(data.metrics.avg_dwell_per_zone["SKINCARE"])}</strong>
+                        </div>
+                        <div className="heatmap-mini-card">
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Moisturiser</span>
+                          <strong style={{ fontSize: '0.85rem' }}>{formatDwellTime(data.metrics.avg_dwell_per_zone["MOISTURISER"])}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Conversion Funnel */}
+                <div className="glass-panel funnel-panel">
+                  <h3 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                    Store Conversion Funnel
+                  </h3>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Visitor progression from initial entrance to checkout purchase</p>
+                  
+                  <div className="funnel-steps">
+                    {data.funnel.funnel.map((item, idx) => {
+                      const entryCount = data.funnel.funnel[0].visitors || 1;
+                      const ratio = item.visitors / entryCount;
+                      const pctWidth = `${Math.max(4, ratio * 100)}%`;
+                      
+                      return (
+                        <div className="funnel-step" key={idx}>
+                          <div className="funnel-rank">{idx + 1}</div>
+                          <div className="funnel-details">
+                            <div className="funnel-fill-bg" style={{ width: pctWidth }} />
+                            <span className="funnel-name">{item.stage}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', zIndex: 1 }}>
+                              <span className="funnel-count">{item.visitors} visitors</span>
+                              {item.dropoff_pct > 0 && (
+                                <span className="funnel-dropoff">
+                                  -{item.dropoff_pct.toFixed(0)}% Drop
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Side: Ticker Event Log & Checkout Gauge */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+                {/* Checkout Depth Circle */}
+                <div className="glass-panel gauge-container">
+                  <h3 style={{ fontSize: '1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+                    Checkout Queue Depth
+                  </h3>
+                  <svg className="gauge-svg" viewBox="0 0 100 50">
+                    <path className="gauge-bg" d="M 10 50 A 40 40 0 0 1 90 50" />
+                    <path 
+                      className="gauge-fill" 
+                      d="M 10 50 A 40 40 0 0 1 90 50" 
+                      stroke={gaugeColor}
+                      strokeDasharray="125"
+                      strokeDashoffset={125 - (Math.min(10, queueVal) / 10) * 125}
+                    />
+                  </svg>
+                  <div className="gauge-value" style={{ textShadow: `0 0 15px ${gaugeColor}` }}>
+                    {queueVal}
+                  </div>
+                  <div className="gauge-desc">Detections active in Billing Area</div>
+                  
+                  {/* Inline Alert recommendation */}
+                  {queueVal >= 4 && (
+                    <div className="queue-warning-panel">
+                      <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                        <span style={{ fontSize: '1rem' }}>⚠️</span>
+                        <strong style={{ fontSize: '0.8rem', color: '#fff' }}>Queue Congestion Alert</strong>
+                      </div>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.3rem' }}>
+                        Queue depth reached {queueVal}. Suggestion: Open an additional register counter immediately.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Dynamic Event Feed Ticker */}
+                <div className="glass-panel" style={{ padding: '1.75rem' }}>
+                  <div className="feed-header">
+                    <div className="feed-title-block">
+                      <h3 style={{ fontSize: '1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="4" width="18" height="16" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                        Live Activity Stream
+                      </h3>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Raw events polled from edge camera nodes</p>
+                    </div>
+                    
+                    <button 
+                      className={`pause-btn ${isFeedPaused ? 'paused' : ''}`}
+                      onClick={() => setIsFeedPaused(!isFeedPaused)}
+                    >
+                      {isFeedPaused ? (
+                        <React.Fragment>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                          Resume Feed
+                        </React.Fragment>
+                      ) : (
+                        <React.Fragment>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                          Freeze Feed
+                        </React.Fragment>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Filter chips */}
+                  <div className="filter-chips">
+                    {[
+                      { id: "ALL", label: "All Events" },
+                      { id: "ENTRY", label: "Entries" },
+                      { id: "FLOOR", label: "Floor Dwells" },
+                      { id: "QUEUE", label: "Checkout" },
+                      { id: "STAFF", label: "Staff Detections" }
+                    ].map(chip => (
+                      <span 
+                        key={chip.id}
+                        className={`filter-chip ${feedFilter === chip.id ? 'active' : ''}`}
+                        onClick={() => setFeedFilter(chip.id)}
+                      >
+                        {chip.label}
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className="activity-feed-scroll">
+                    {filteredEvents.map((ev) => {
+                      let badgeClass = "zone_enter";
+                      if (ev.event_type === "ENTRY") badgeClass = "entry";
+                      else if (ev.event_type === "EXIT") badgeClass = "exit";
+                      else if (ev.event_type === "REENTRY") badgeClass = "reentry";
+                      else if (ev.event_type === "ZONE_EXIT") badgeClass = "zone_exit";
+                      else if (ev.event_type === "ZONE_DWELL") badgeClass = "dwell";
+                      else if (ev.event_type === "BILLING_QUEUE_JOIN") badgeClass = "queue";
+
+                      const timeStr = new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+                      return (
+                        <div className="activity-item" key={ev.event_id}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                              {ev.is_staff && <span style={{ color: 'var(--purplle-light)', marginRight: '6px', fontWeight: 800 }}>[Staff]</span>}
+                              {ev.visitor_id.substring(0, 8)}
+                              <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: '4px' }}>
+                                {ev.event_type.replace(/_/g, ' ').toLowerCase()}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                              Cam: {ev.camera_id} • Conf: {(ev.confidence * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                          
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
+                            <span className={`activity-badge ${badgeClass}`}>{ev.event_type.split('_').pop()}</span>
+                            <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>{timeStr}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {filteredEvents.length === 0 && (
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', textAlign: 'center', padding: '2rem 0' }}>
+                        No events match current filter. Stream data is active.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

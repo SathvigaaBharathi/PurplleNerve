@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+
+# Models and Large Files
+*.pt
+*.onnx
+
+# Data and Outputs
+output/*.jsonl
+!output/.gitkeep
+data/pos_transactions.csv
+data/store_layout.json
+
+# IDEs
+.vscode/
+.idea/
