@@ -69,16 +69,13 @@ def event_loop():
 
 @pytest.fixture(scope="session", autouse=True)
 async def setup_test_db():
-    # Initialise tables and view
+    # Initialise tables and view (create if they don't exist)
     async with engine.begin() as conn:
-        await conn.execute(text("DROP MATERIALIZED VIEW IF EXISTS zone_dwell_agg CASCADE;"))
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
         
-        # Create materialized view
-        await conn.execute(text("DROP MATERIALIZED VIEW IF EXISTS zone_dwell_agg CASCADE;"))
+        # Create materialized view if not exists
         await conn.execute(text("""
-            CREATE MATERIALIZED VIEW zone_dwell_agg AS
+            CREATE MATERIALIZED VIEW IF NOT EXISTS zone_dwell_agg AS
             SELECT
                 store_id,
                 zone_id,
@@ -90,14 +87,20 @@ async def setup_test_db():
               AND timestamp > NOW() - INTERVAL '24 hours'
             GROUP BY store_id, zone_id;
         """))
+        
         await conn.execute(text("""
-            CREATE UNIQUE INDEX ON zone_dwell_agg(store_id, zone_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_zone_dwell_agg_store_zone 
+            ON zone_dwell_agg(store_id, zone_id);
         """))
+        
+        # Truncate tables for a clean test run
+        await conn.execute(text("TRUNCATE TABLE events, pos_transactions, session_conversions CASCADE;"))
+        await conn.execute(text("REFRESH MATERIALIZED VIEW zone_dwell_agg;"))
     yield
-    # Clean up tables after session
+    # Clean up table rows after session (do not drop tables to avoid crashing live app)
     async with engine.begin() as conn:
-         await conn.execute(text("DROP MATERIALIZED VIEW IF EXISTS zone_dwell_agg CASCADE;"))
-         await conn.run_sync(Base.metadata.drop_all)
+         await conn.execute(text("TRUNCATE TABLE events, pos_transactions, session_conversions CASCADE;"))
+         await conn.execute(text("REFRESH MATERIALIZED VIEW zone_dwell_agg;"))
 
 @pytest.fixture
 async def db_session():
