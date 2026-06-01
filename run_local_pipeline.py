@@ -19,7 +19,8 @@ def load_env(env_path=".env"):
                             val = val[1:-1]
                         elif val.startswith("'") and val.endswith("'"):
                             val = val[1:-1]
-                        os.environ[key] = val
+                        if key not in os.environ:
+                            os.environ[key] = val
 
 def main():
     # Set the working directory to the script directory
