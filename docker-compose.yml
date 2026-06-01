@@ -52,7 +52,7 @@ services:
       REDIS_URL: redis://redis:6379
       API_URL: http://api:8000
     volumes:
-      - ../CCTV Footage:/clips:ro  # Mounts the D:\purplle\CCTV Footage folder read-only
+      - ${CCTV_CLIPS_DIR:-../CCTV Footage}:/clips:ro  # Mounts the CCTV Footage folder read-only
       - ./data:/data:ro
       - ./output:/output   # JSONL output written here
     depends_on:

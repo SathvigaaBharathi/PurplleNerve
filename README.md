@@ -72,11 +72,12 @@ curl -X POST http://localhost:8000/pos/load
 ### Option 2: Native Run (Windows PowerShell)
 
 ```powershell
-# 1. Run local FastAPI / Uvicorn server
-$env:DATABASE_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/retail_intelligence"; $env:REDIS_URL="redis://localhost:6379"; python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 1. Configure the CCTV clips folder path in your .env file:
+# CCTV_CLIPS_DIR=D:\purplle\CCTV Footage
 
-# 2. Run the detection pipeline on camera feeds (example: CAM 1)
-$env:DATABASE_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/retail_intelligence"; python -m pipeline.detect --clip "CCTV Footage\CAM 1.mp4" --store-id STORE_BLR_002 --layout data/store_layout.json --output output/events_blr_cam1.jsonl --api-url http://127.0.0.1:8000 --real --loop --conf-threshold 0.50
+# 2. Run the orchestrator to launch the server and all 5 camera pipelines:
+python run_local_pipeline.py
+
 ```
 
 ---
