@@ -113,7 +113,7 @@ async def process_clip(
     
     # 1. Load store layout
     # Try searching paths for layout
-    layout_data = load_store_layout()
+    layout_data = load_store_layout(layout_path)
     store_conf = layout_data.get(store_id, {})
     if not store_conf:
         logger.error(f"Store config not found for store_id={store_id}")

@@ -53,7 +53,25 @@ async def get_active_cameras(store_id: str, db: AsyncSession) -> list[str]:
     )
     return [row[0] for row in result.fetchall()]
 
-def load_store_layout():
+def load_store_layout(layout_path: str = None):
+    # 1. Check layout_path if provided
+    if layout_path and os.path.exists(layout_path):
+        try:
+            with open(layout_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading layout at {layout_path}: {e}")
+
+    # 2. Check environment variable override
+    env_path = os.getenv("REAL_LAYOUT_JSON_PATH")
+    if env_path and os.path.exists(env_path):
+        try:
+            with open(env_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading layout override at {env_path}: {e}")
+
+    # 3. Fallback search paths
     paths = [
         "data/store_layout.json",
         "/app/data/store_layout.json",
@@ -76,6 +94,7 @@ def load_store_layout():
             "staff_uniform_hue_range": [95, 115]
         }
     }
+
 
 def is_within_open_hours(store_layout, store_id, dt: datetime) -> bool:
     """Check if the given datetime is within store open hours."""

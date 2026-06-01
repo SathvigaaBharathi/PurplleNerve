@@ -87,11 +87,12 @@ def main():
             continue
             
         print(f"[+] Launching edge pipeline for {cam['name']}...")
+        layout_file = os.getenv("REAL_LAYOUT_JSON_PATH", "data/store_layout.json")
         pipeline_cmd = [
             sys.executable, "-m", "pipeline.detect",
             "--clip", clip_path,
             "--store-id", "STORE_BLR_002",
-            "--layout", "data/store_layout.json",
+            "--layout", layout_file,
             "--output", cam["out"],
             "--api-url", api_url,
             "--real",

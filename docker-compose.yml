@@ -35,6 +35,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://retail:retail_secret@postgres:5432/retail_intelligence
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: INFO
+      REAL_POS_CSV_PATH: ${REAL_POS_CSV_PATH:-}
+      REAL_LAYOUT_JSON_PATH: ${REAL_LAYOUT_JSON_PATH:-}
     depends_on:
       postgres:
         condition: service_healthy

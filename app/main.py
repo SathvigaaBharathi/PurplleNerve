@@ -425,43 +425,31 @@ async def startup_event():
         
     # 3. Load POS transactions from CSV if present
     async with AsyncSessionLocal() as db:
-        csv_paths = [
-            "data/pos_transactions.csv",
-            "/app/data/pos_transactions.csv",
-            "../data/pos_transactions.csv",
-            "D:/purplle/store-intelligence/data/pos_transactions.csv"
-        ]
-        for p in csv_paths:
-            if os.path.exists(p):
-                await load_pos_transactions_from_csv(p, db)
-                await correlate_transactions(db)
-                break
+        real_csv = os.getenv("REAL_POS_CSV_PATH")
+        if real_csv and os.path.exists(real_csv):
+            await load_pos_transactions_from_csv(real_csv, db)
+            await correlate_transactions(db)
+        else:
+            csv_paths = [
+                "data/pos_transactions.csv",
+                "/app/data/pos_transactions.csv",
+                "../data/pos_transactions.csv",
+                "D:/purplle/store-intelligence/data/pos_transactions.csv"
+            ]
+            for p in csv_paths:
+                if os.path.exists(p):
+                    await load_pos_transactions_from_csv(p, db)
+                    await correlate_transactions(db)
+                    break
+
                 
     # 4. Fire background correlation task
     asyncio.create_task(pos_correlation_loop())
 
 
-    # 6. Load store layout cameras for health check camera list
+    # 5. Load store layout cameras for health check camera list
     try:
-        from app.health import ALL_KNOWN_CAMERAS
-        paths = [
-            "data/store_layout.json",
-            "/app/data/store_layout.json",
-            "../data/store_layout.json",
-            "store-intelligence/data/store_layout.json",
-            "D:/purplle/store-intelligence/data/store_layout.json"
-        ]
-        layout = None
-        for p in paths:
-            if os.path.exists(p):
-                with open(p, "r") as f:
-                    layout = json.load(f)
-                break
-        if layout:
-            for s_id, store_data in layout.items():
-                if isinstance(store_data, dict) and "cameras" in store_data:
-                    cameras_dict = store_data.get("cameras", {})
-                    if isinstance(cameras_dict, dict):
-                        ALL_KNOWN_CAMERAS[s_id] = list(cameras_dict.keys())
+        from app.health import ensure_all_known_cameras
+        ensure_all_known_cameras()
     except Exception as e:
         logger.error(f"Failed to load store layout cameras on startup: {e}")
