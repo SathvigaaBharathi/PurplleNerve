@@ -177,6 +177,7 @@
       const [totalEvents, setTotalEvents] = useState(0);
       const [eventsPerMin, setEventsPerMin] = useState(0);
       const [activeCameras, setActiveCameras] = useState([]);
+      const [activeVideoCam, setActiveVideoCam] = useState("CAM_ENTRY_01");
 
       const eventCountRef = useRef(0);
       const eventTimestampsRef = useRef([]);
@@ -940,6 +941,71 @@
                           <strong style={{ fontSize: '0.85rem' }}>{formatDwellTime(data.metrics.avg_dwell_per_zone["MOISTURISER"])}</strong>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live Video Streams */}
+                <div className="glass-panel video-panel" style={{ marginBottom: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+                    <div>
+                      <h3 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>
+                        Live CCTV Bounding Box Overlays
+                      </h3>
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Real-time ML detections: Green = Customer, Gold = Staff, Pink = Reentry, Red = Billing</p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      {["CAM_ENTRY_01", "CAM_FLOOR_01", "CAM_BILLING_01"].map(cam => (
+                        <button
+                          key={cam}
+                          onClick={() => setActiveVideoCam(cam)}
+                          style={{
+                            background: activeVideoCam === cam ? 'var(--purplle-light)' : 'rgba(255,255,255,0.04)',
+                            border: '1px solid var(--border-color)',
+                            color: '#fff',
+                            fontSize: '0.75rem',
+                            padding: '0.4rem 0.8rem',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            fontWeight: 700,
+                            transition: 'all 0.2s ease'
+                          }}
+                        >
+                          {cam === "CAM_ENTRY_01" ? "Entry (CAM 1)" : cam === "CAM_FLOOR_01" ? "Floor (CAM 2)" : "Billing (CAM 3)"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ position: 'relative', width: '100%', minHeight: '300px', background: '#000', borderRadius: '12px', border: '1px solid var(--border-color)', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {activeCameras.includes(activeVideoCam) ? (
+                      <img 
+                        src={`/stores/${storeId}/cameras/${activeVideoCam}/video_feed`} 
+                        style={{ width: '100%', height: 'auto', display: 'block' }} 
+                        alt="CCTV stream loading..."
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                          e.target.nextSibling.style.display = 'flex';
+                        }}
+                      />
+                    ) : null}
+                    
+                    <div 
+                      style={{ 
+                        display: activeCameras.includes(activeVideoCam) ? 'none' : 'flex', 
+                        flexDirection: 'column', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        color: 'rgba(255,255,255,0.4)',
+                        fontFamily: 'monospace',
+                        textAlign: 'center',
+                        padding: '2rem'
+                      }}
+                    >
+                      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '1rem', opacity: 0.3 }}><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/></svg>
+                      <span style={{ fontSize: '1rem', fontWeight: 700, letterSpacing: '2px', color: 'var(--crit-gradient)' }}>[ NO SIGNAL ]</span>
+                      <span style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-muted)' }}>Camera offline or not actively emitting stream events</span>
                     </div>
                   </div>
                 </div>

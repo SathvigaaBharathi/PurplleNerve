@@ -400,6 +400,8 @@ async def process_clip(
  
                 # Emit ENTRY or REENTRY if matching state machine
                 if event_type in ("ENTRY", "REENTRY"):
+                    if event_type == "REENTRY" and visitor_id in session_manager.active_sessions:
+                        session_manager.active_sessions[visitor_id]["reentry"] = True
                     await emitter.emit(
                         store_id=store_id,
                         camera_id=camera_id,
@@ -547,6 +549,77 @@ async def process_clip(
                     session_seq=seq
                 )
                 
+            # --- DRAW VISUAL OVERLAYS ON FRAME ---
+            # Draw camera zones polygons
+            for z_name, z_conf in camera_zones.items():
+                poly = z_conf.get("polygon", [])
+                if poly:
+                    pts = np.array([[int(p[0] * frame_w), int(p[1] * frame_h)] for p in poly], np.int32)
+                    pts = pts.reshape((-1, 1, 2))
+                    cv2.polylines(frame, [pts], True, (120, 120, 120), 2)
+                    # Label zone name
+                    cx_z = int(np.mean([p[0] * frame_w for p in poly]))
+                    cy_z = int(np.mean([p[1] * frame_h for p in poly]))
+                    cv2.putText(frame, z_name, (cx_z - 30, cy_z), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 2)
+
+            # Draw tracks
+            for obj in tracked_objs:
+                track_id = obj["track_id"]
+                box = obj["box"]
+                x1, y1, x2, y2 = [int(coord) for coord in box]
+                
+                # Fetch visitor details
+                visitor_id = session_manager.track_to_visitor.get(track_id, f"TRK_{track_id}")
+                session_data = session_manager.active_sessions.get(visitor_id)
+                is_staff = session_data.get("is_staff", False) if session_data else False
+                is_reentry = session_data.get("reentry", False) if session_data else False
+                
+                # Determine zone
+                cx = int((box[0] + box[2]) / 2.0)
+                cy = int((box[1] + box[3]) / 2.0)
+                zone_id, _ = get_zone_for_centroid(cx, cy, frame_w, frame_h, camera_zones)
+
+                # Select color: BGR format
+                if is_staff:
+                    color = (0, 215, 255) # Gold/Yellow for Staff
+                    label = f"STAFF: {visitor_id}"
+                elif is_reentry:
+                    color = (255, 0, 255) # Magenta for Reentry
+                    label = f"REENTRY: {visitor_id}"
+                elif zone_id == "BILLING":
+                    color = (0, 0, 255) # Red for Billing
+                    label = f"BILLING: {visitor_id}"
+                elif zone_id:
+                    color = (0, 255, 0) # Green for Skincare/Moisturiser
+                    label = f"{zone_id}: {visitor_id}"
+                else:
+                    color = (255, 165, 0) # Orange for General Customer
+                    label = f"VISITOR: {visitor_id}"
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                cv2.rectangle(frame, (x1, y1 - 22), (x1 + w, y1), color, -1)
+                cv2.putText(frame, label, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+
+            # Stream frame to server at 10 FPS (every 3rd frame out of 30)
+            if api_url and frame_idx % 3 == 0:
+                _, jpeg_bytes = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                
+                async def post_frame(f_bytes):
+                    try:
+                        import httpx
+                        async with httpx.AsyncClient() as client:
+                            await client.post(
+                                f"{api_url}/stores/{store_id}/cameras/{camera_id}/frame", 
+                                content=f_bytes,
+                                headers={"Content-Type": "image/jpeg"},
+                                timeout=0.5
+                            )
+                    except Exception:
+                        pass
+                
+                asyncio.create_task(post_frame(jpeg_bytes.tobytes()))
+
             spatial_registry.prune_old_buckets(curr_ts)
         else:
             frames_batch.append(frame)

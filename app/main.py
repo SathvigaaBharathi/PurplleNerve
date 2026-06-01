@@ -27,6 +27,9 @@ from app.pos import load_pos_transactions_from_csv, correlate_transactions
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Global cache for latest camera frames for MJPEG video streaming
+latest_frames = {}
+
 app = FastAPI(
     title="Retail Nerve System API",
     description="Analytics system for physical retail stores",
@@ -178,6 +181,31 @@ async def event_stream(store_id: str, redis: Redis = Depends(get_redis)):
             await asyncio.sleep(2)
             
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+# Video streaming endpoints
+@app.post("/stores/{store_id}/cameras/{camera_id}/frame")
+async def upload_frame(store_id: str, camera_id: str, request: Request):
+    """Pipeline camera nodes post JPEG frames here for real-time visualization."""
+    frame_bytes = await request.body()
+    latest_frames[f"{store_id}_{camera_id}"] = frame_bytes
+    return {"status": "success"}
+
+@app.get("/stores/{store_id}/cameras/{camera_id}/video_feed")
+async def video_feed(store_id: str, camera_id: str):
+    """Streams MJPEG frames to standard browser img tags."""
+    async def frame_generator():
+        while True:
+            frame = latest_frames.get(f"{store_id}_{camera_id}")
+            if frame:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            # Throttles yielding to match the pipeline output (approx 10 FPS)
+            await asyncio.sleep(0.1)
+            
+    return StreamingResponse(
+        frame_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 # POST /pos/load - endpoint to manually load POS data
 @app.post("/pos/load")
