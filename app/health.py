@@ -157,9 +157,7 @@ async def health_check(
             last_ts = res_last.scalar_one_or_none()
             
             # Query count last hour
-            # Let's say last hour from now
-            one_hour_ago = now_dt - select(text("INTERVAL '1 hour'"))
-            # Alternatively, compute time in Python
+            # Compute time in Python
             import datetime as dt_module
             one_hour_ago = now_dt - dt_module.timedelta(hours=1)
             

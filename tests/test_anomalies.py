@@ -126,8 +126,10 @@ async def test_no_anomalies_when_store_is_healthy(client, seed_events):
     ev5 = {**make_dummy_event(event_type="ZONE_ENTER", zone_id="MOISTURISER"), "camera_id": "CAM_FLOOR_01", "timestamp": t}
     ev6 = {**make_dummy_event(event_type="ZONE_ENTER", zone_id="BILLING"), "camera_id": "CAM_BILLING_01", "timestamp": t}
     ev7 = {**make_dummy_event(event_type="BILLING_QUEUE_JOIN"), "queue_depth": 2, "camera_id": "CAM_BILLING_01", "timestamp": t}
+    ev8 = {**make_dummy_event(event_type="ENTRY"), "camera_id": "CAM_FLOOR_02", "timestamp": t}
+    ev9 = {**make_dummy_event(event_type="ENTRY"), "camera_id": "CAM_BILLING_02", "timestamp": t}
     
-    await seed_events([ev1, ev2, ev3, ev4, ev5, ev6, ev7])
+    await seed_events([ev1, ev2, ev3, ev4, ev5, ev6, ev7, ev8, ev9])
     
     res = await client.get("/stores/STORE_BLR_002/anomalies")
     assert res.status_code == 200

@@ -71,16 +71,22 @@ async def test_health_stale_feed_detected_for_store_with_old_events(client, seed
 
 async def test_health_live_feed_for_store_with_recent_events(client, seed_events):
     """
-    Insert a fresh event (< 10 minutes old).
+    Insert a fresh event (< 10 minutes old) for all known cameras.
     Health endpoint should flag that store's feed as LIVE.
     """
+    from app.health import ALL_KNOWN_CAMERAS, ensure_all_known_cameras
+    ensure_all_known_cameras()
+    known_cams = ALL_KNOWN_CAMERAS.get("STORE_BLR_002", ["CAM_ENTRY_01"])
+
     fresh_ts = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)
-    ev = {
-        **make_dummy_event(event_type="ENTRY"),
-        "camera_id": "CAM_ENTRY_01",
-        "timestamp": fresh_ts
-    }
-    await seed_events([ev])
+    events = []
+    for cam in known_cams:
+        events.append({
+            **make_dummy_event(event_type="ENTRY"),
+            "camera_id": cam,
+            "timestamp": fresh_ts
+        })
+    await seed_events(events)
 
     res = await client.get("/health")
     assert res.status_code == 200
