@@ -145,6 +145,7 @@ async def process_clip(
     # Resolve camera config
     camera_conf = store_conf.get("cameras", {}).get(camera_id, {})
     camera_zones = camera_conf.get("zones", {})
+    camera_exclusion_zones = camera_conf.get("exclusion_zones", [])
     homography_matrix = camera_conf.get("homography", {}).get("CAM_ENTRY_01", None)
     staff_hue = store_conf.get("staff_uniform_hue_range", [95, 115])
     camera_type = camera_conf.get("camera_type", "entry")
@@ -223,6 +224,9 @@ async def process_clip(
 
     # Track sequence IDs per visitor session
     session_sequences = {} # visitor_id -> current seq count
+    
+    # Motion history to detect static bounding boxes (posters, mirrors, banners)
+    track_motion_history = {} # track_id -> {"centroids": [], "is_static": bool}
 
     # Baseline time for events
     start_time = datetime.now(timezone.utc)
@@ -302,11 +306,61 @@ async def process_clip(
         nonlocal tracked_objs, frames_processed
         frames_processed += 1
         
+        # 1. Filter raw detections using camera exclusion zones
+        filtered_dets = []
+        for det in detections:
+            box = det["box"]
+            cx = (box[0] + box[2]) / 2.0
+            cy = (box[1] + box[3]) / 2.0
+            nx = cx / frame_w
+            ny = cy / frame_h
+            
+            is_excluded = False
+            for ez in camera_exclusion_zones:
+                from pipeline.zones import point_in_polygon
+                if point_in_polygon(nx, ny, ez):
+                    is_excluded = True
+                    break
+            if not is_excluded:
+                filtered_dets.append(det)
+        detections = filtered_dets
+        
         # Update tracker
         curr_tracked_objs, disappeared_track_ids = tracker.update(detections)
         
-        # Emit exits for disappeared tracks
+        # 2. Update motion history and detect static false tracks (e.g. posters/banners)
+        for obj in curr_tracked_objs:
+            track_id = obj["track_id"]
+            box = obj["box"]
+            cx = (box[0] + box[2]) / 2.0
+            cy = (box[1] + box[3]) / 2.0
+            
+            if track_id not in track_motion_history:
+                track_motion_history[track_id] = {
+                    "history": [(cx, cy)],
+                    "is_static": False
+                }
+            else:
+                hist = track_motion_history[track_id]["history"]
+                hist.append((cx, cy))
+                if len(hist) > 10:
+                    hist.pop(0)
+                
+                # If track is active for at least 5 frames, check if total movement is negligible (< 3 pixels)
+                if len(hist) >= 5:
+                    xs = [pt[0] for pt in hist]
+                    ys = [pt[1] for pt in hist]
+                    dx = max(xs) - min(xs)
+                    dy = max(ys) - min(ys)
+                    if dx < 3.0 and dy < 3.0:
+                        track_motion_history[track_id]["is_static"] = True
+        
+        # Emit exits for disappeared tracks (skip if the track was static)
         for t_id in disappeared_track_ids:
+            is_static_track = track_motion_history.pop(t_id, {}).get("is_static", False)
+            if is_static_track:
+                continue
+                
             disappear_events = session_manager.disappear_track(t_id, infer_ts)
             for ev in disappear_events:
                 seq = session_sequences.get(ev["visitor_id"], 0)
@@ -329,6 +383,8 @@ async def process_clip(
         
         for obj in curr_tracked_objs:
             track_id = obj["track_id"]
+            if track_motion_history.get(track_id, {}).get("is_static", False):
+                continue
             box = obj["box"]
             conf = obj["confidence"]
             
@@ -385,6 +441,8 @@ async def process_clip(
         
         for obj in curr_tracked_objs:
             track_id = obj["track_id"]
+            if track_motion_history.get(track_id, {}).get("is_static", False):
+                continue
             box = obj["box"]
             conf = obj["confidence"]
             
