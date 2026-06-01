@@ -188,8 +188,97 @@ async def event_stream(store_id: str, redis: Redis = Depends(get_redis)):
                     yield f"data: {json.dumps({'error': 'DATA_RETRIEVAL_ERROR', 'message': str(e)})}\n\n"
                     
             await asyncio.sleep(2)
-            
+
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+# Shared Re-ID Registry for cross-camera synchronization
+global_reid_sessions = {}
+
+@app.post("/stores/{store_id}/reid/sync")
+async def sync_reid_tracks(store_id: str, request: Request):
+    """
+    Syncs local camera tracks with the global Re-ID registry.
+    Consolidates visitor_ids and is_staff statuses across all cameras.
+    """
+    import numpy as np
+    
+    payload = await request.json()
+    current_time = time.time()
+    
+    # Prune expired sessions (not seen for > 30 seconds)
+    expired_keys = [
+        vid for vid, data in global_reid_sessions.items()
+        if current_time - data["last_seen"] > 30.0
+    ]
+    for vid in expired_keys:
+        global_reid_sessions.pop(vid, None)
+        
+    synced_tracks = []
+    incoming_tracks = payload.get("tracks", [])
+    
+    for track in incoming_tracks:
+        t_id = track.get("track_id")
+        v_id = track.get("visitor_id")
+        emb = track.get("embedding")
+        is_staff = track.get("is_staff", False)
+        
+        resolved_vid = None
+        resolved_is_staff = is_staff
+        
+        # 1. If visitor_id is provided and exists globally, use it
+        if v_id and v_id in global_reid_sessions:
+            resolved_vid = v_id
+            global_reid_sessions[v_id]["last_seen"] = current_time
+            if is_staff:
+                global_reid_sessions[v_id]["is_staff"] = True
+            resolved_is_staff = global_reid_sessions[v_id]["is_staff"]
+            
+        # 2. Otherwise, check for match in global sessions
+        if not resolved_vid and emb:
+            best_match_vid = None
+            best_sim = -1.0
+            emb_np = np.array(emb)
+            
+            for vid, session_data in global_reid_sessions.items():
+                s_emb = np.array(session_data["embedding"])
+                # Compute cosine similarity
+                dot_prod = np.dot(emb_np, s_emb)
+                norm_emb = np.linalg.norm(emb_np)
+                norm_s = np.linalg.norm(s_emb)
+                if norm_emb > 0 and norm_s > 0:
+                    sim = float(dot_prod / (norm_emb * norm_s))
+                else:
+                    sim = 0.0
+                    
+                if sim > best_sim:
+                    best_sim = sim
+                    best_match_vid = vid
+                    
+            if best_match_vid and best_sim > 0.82:
+                resolved_vid = best_match_vid
+                global_reid_sessions[resolved_vid]["last_seen"] = current_time
+                if is_staff:
+                    global_reid_sessions[resolved_vid]["is_staff"] = True
+                resolved_is_staff = global_reid_sessions[resolved_vid]["is_staff"]
+                
+        # 3. If still not resolved, register as a new global session
+        if not resolved_vid:
+            resolved_vid = v_id or f"VIS_{str(uuid.uuid4())[:8]}"
+            global_reid_sessions[resolved_vid] = {
+                "visitor_id": resolved_vid,
+                "embedding": emb,
+                "is_staff": is_staff,
+                "last_seen": current_time
+            }
+            resolved_is_staff = is_staff
+            
+        synced_tracks.append({
+            "track_id": t_id,
+            "visitor_id": resolved_vid,
+            "is_staff": resolved_is_staff
+        })
+        
+    return {"synced_tracks": synced_tracks}
 
 # Video streaming endpoints
 @app.post("/stores/{store_id}/cameras/{camera_id}/frame")

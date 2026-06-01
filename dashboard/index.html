@@ -170,8 +170,8 @@
               frameCountRef.current = 0;
               lastFpsTimeRef.current = now;
             }
-            // Schedule next frame load sequentially 80ms later to keep it live and smooth
-            timeoutId = setTimeout(fetchFrame, 80);
+            // Schedule next frame load sequentially 200ms later to keep it live and smooth
+            timeoutId = setTimeout(fetchFrame, 200);
           };
           img.onerror = () => {
             if (!active) return;

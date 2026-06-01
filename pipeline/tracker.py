@@ -43,12 +43,45 @@ class SessionManager:
         store_id: str,
         camera_id: str,
         is_staff: bool,
-        confidence: float
+        confidence: float,
+        visitor_id_override: str = None
     ) -> tuple[str, str | None]:
         """
         Registers a new track. Checks for re-entry match in grace sessions.
         Returns (visitor_id, event_to_emit).
         """
+        # If override is provided from shared Re-ID registry, use it directly
+        if visitor_id_override:
+            vid = visitor_id_override
+            self.track_to_visitor[track_id] = vid
+            
+            event_type = None
+            if vid not in self.active_sessions:
+                event_type = "ENTRY"
+                if vid in self.grace_sessions:
+                    self.grace_sessions.pop(vid)
+                    event_type = "REENTRY"
+                
+                self.active_sessions[vid] = {
+                    "visitor_id": vid,
+                    "track_id": track_id,
+                    "store_id": store_id,
+                    "camera_id": camera_id,
+                    "embedding": embedding,
+                    "last_seen": timestamp,
+                    "started_at": timestamp,
+                    "is_staff": is_staff,
+                    "confidence": confidence,
+                    "current_zone": None,
+                    "zone_entry_time": None,
+                    "session_seq": 0
+                }
+            else:
+                self.active_sessions[vid]["last_seen"] = timestamp
+                self.active_sessions[vid]["is_staff"] = is_staff
+                
+            return vid, event_type
+
         # 1. Check if track already mapped to active session
         if track_id in self.track_to_visitor:
             vid = self.track_to_visitor[track_id]

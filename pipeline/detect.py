@@ -6,6 +6,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
+import time as time_module
 
 from pipeline.staff import classify_staff
 from pipeline.zones import get_zone_for_centroid
@@ -244,9 +245,380 @@ async def process_clip(
     # actual clip fps (25 fps) so we run inference only every INFER_EVERY
     # frames and push every frame to the stream endpoint.
     INFER_EVERY = max(1, int(fps))          # infer once per second of video
-    STREAM_INTERVAL = 1.0 / min(fps, 15.0) # push to server at most 15 fps
+    STREAM_INTERVAL = 0.20                 # push to server at 5 fps
+
+
+    # Define nested helper functions for background/asynchronous inference
+    def detect_objects_sync(frame_to_detect):
+        detections = []
+        if camera_type == "billing":
+            import torch
+            img_rgb = cv2.cvtColor(frame_to_detect, cv2.COLOR_BGR2RGB)
+            inputs = rtdetr_processor(images=img_rgb, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = rtdetr_model(**inputs)
+            
+            results = rtdetr_processor.post_process_object_detection(
+                outputs,
+                target_sizes=[(frame_h, frame_w)],
+                threshold=conf_threshold
+            )
+            
+            boxes = results[0]["boxes"].cpu().numpy()
+            labels = results[0]["labels"].cpu().numpy()
+            scores = results[0]["scores"].cpu().numpy()
+            
+            for box, label, score in zip(boxes, labels, scores):
+                if label == 0:
+                    detections.append({
+                        "box": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
+                        "confidence": float(score)
+                    })
+        else:
+            results = yolov9_model(frame_to_detect, classes=[0], verbose=False)
+            boxes = results[0].boxes
+            for box in boxes:
+                cls = int(box.cls[0])
+                conf = float(box.conf[0])
+                if cls == 0 and conf >= conf_threshold:
+                    xyxy = box.xyxy[0].cpu().numpy()
+                    x1f, y1f, x2f, y2f = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
+                    bbox_h = y2f - y1f
+                    bbox_w = x2f - x1f
+                    # Filter tiny detections (mirrors, photos, banners):
+                    if bbox_h < 60 or bbox_w < 25:
+                        continue
+                    # Suppress very flat detections
+                    if bbox_h > 0 and (bbox_w / bbox_h) > 3.0:
+                        continue
+                    detections.append({
+                        "box": [x1f, y1f, x2f, y2f],
+                        "confidence": conf
+                    })
+        return detections
+
+    async def process_detections_and_sync(detections, frame_to_detect, infer_ts):
+        nonlocal tracked_objs, frames_processed
+        frames_processed += 1
+        
+        # Update tracker
+        curr_tracked_objs, disappeared_track_ids = tracker.update(detections)
+        
+        # Emit exits for disappeared tracks
+        for t_id in disappeared_track_ids:
+            disappear_events = session_manager.disappear_track(t_id, infer_ts)
+            for ev in disappear_events:
+                seq = session_sequences.get(ev["visitor_id"], 0)
+                await emitter.emit(
+                    store_id=store_id,
+                    camera_id=camera_id,
+                    visitor_id=ev["visitor_id"],
+                    event_type=ev["event_type"],
+                    timestamp=ev["timestamp"],
+                    zone_id=ev["zone_id"],
+                    dwell_ms=ev["dwell_ms"],
+                    is_staff=ev["is_staff"],
+                    confidence=ev["confidence"],
+                    session_seq=seq
+                )
+                
+        # Gather crops, extract embeddings, check staff
+        tracks_payload = []
+        temp_track_data = {}
+        
+        for obj in curr_tracked_objs:
+            track_id = obj["track_id"]
+            box = obj["box"]
+            conf = obj["confidence"]
+            
+            x1, y1, x2, y2 = box
+            x1_c = max(0, int(x1))
+            y1_c = max(0, int(y1))
+            x2_c = min(frame_w, int(x2))
+            y2_c = min(frame_h, int(y2))
+            
+            crop = None
+            is_staff, staff_conf = False, 0.0
+            if x2_c > x1_c and y2_c > y1_c:
+                crop = frame_to_detect[y1_c:y2_c, x1_c:x2_c]
+                crop_h = crop.shape[0]
+                upper_limit = max(1, int(crop_h * 0.40))
+                upper_crop = crop[0:upper_limit, :]
+                is_staff, staff_conf = classify_staff(upper_crop, staff_hue)
+                
+            embedding = reid_model.extract_embedding(crop, track_id)
+            local_vid = session_manager.track_to_visitor.get(track_id)
+            
+            tracks_payload.append({
+                "track_id": track_id,
+                "visitor_id": local_vid,
+                "embedding": embedding.tolist() if isinstance(embedding, np.ndarray) else embedding,
+                "is_staff": is_staff
+            })
+            
+            temp_track_data[track_id] = {
+                "box": box,
+                "conf": conf,
+                "is_staff": is_staff,
+                "embedding": embedding
+            }
+            
+        # Post tracks to Re-ID sync endpoint
+        synced_tracks = []
+        if api_url and tracks_payload:
+            try:
+                response = await http_client.post(
+                    f"{api_url}/stores/{store_id}/reid/sync",
+                    json={"tracks": tracks_payload},
+                    timeout=2.0
+                )
+                if response.status_code == 200:
+                    synced_tracks = response.json().get("synced_tracks", [])
+            except Exception as e:
+                logger.error(f"Failed to sync Re-ID tracks: {e}")
+                
+        synced_map = {item["track_id"]: (item["visitor_id"], item["is_staff"]) for item in synced_tracks}
+        
+        # Register tracks in session manager and emit events
+        final_tracked_objs = []
+        
+        for obj in curr_tracked_objs:
+            track_id = obj["track_id"]
+            box = obj["box"]
+            conf = obj["confidence"]
+            
+            temp_data = temp_track_data[track_id]
+            embedding = temp_data["embedding"]
+            local_is_staff = temp_data["is_staff"]
+            
+            resolved_vid, resolved_is_staff = synced_map.get(track_id, (None, local_is_staff))
+            
+            should_sup, matched_vid = spatial_registry.should_suppress(
+                store_id=store_id,
+                camera_id=camera_id,
+                box=box,
+                embedding=embedding,
+                timestamp=infer_ts,
+                homography_matrix=homography_matrix
+            )
+            
+            if should_sup:
+                continue
+                
+            visitor_id, event_type = session_manager.register_track(
+                track_id=track_id,
+                embedding=embedding,
+                timestamp=infer_ts,
+                store_id=store_id,
+                camera_id=camera_id,
+                is_staff=resolved_is_staff or local_is_staff,
+                confidence=conf,
+                visitor_id_override=resolved_vid
+            )
+            
+            if visitor_id in session_manager.active_sessions:
+                session_manager.active_sessions[visitor_id]["is_staff"] = resolved_is_staff or local_is_staff
+                
+            is_staff_to_emit = session_manager.active_sessions[visitor_id]["is_staff"]
+            
+            spatial_registry.register_detection(
+                store_id=store_id,
+                camera_id=camera_id,
+                box=box,
+                embedding=embedding,
+                visitor_id=visitor_id,
+                timestamp=infer_ts
+            )
+            
+            if visitor_id not in session_sequences:
+                session_sequences[visitor_id] = 0
+            else:
+                session_sequences[visitor_id] += 1
+            seq = session_sequences[visitor_id]
+            
+            if event_type in ("ENTRY", "REENTRY"):
+                if event_type == "REENTRY" and visitor_id in session_manager.active_sessions:
+                    session_manager.active_sessions[visitor_id]["reentry"] = True
+                await emitter.emit(
+                    store_id=store_id,
+                    camera_id=camera_id,
+                    visitor_id=visitor_id,
+                    event_type=event_type,
+                    timestamp=infer_ts,
+                    is_staff=is_staff_to_emit,
+                    confidence=conf,
+                    session_seq=seq
+                )
+                
+            cx = int((box[0] + box[2]) / 2.0)
+            cy = int((box[1] + box[3]) / 2.0)
+            zone_id, _ = get_zone_for_centroid(cx, cy, frame_w, frame_h, camera_zones)
+            
+            curr_zone_info = visitor_zones.get(visitor_id)
+            
+            if zone_id:
+                if not curr_zone_info or curr_zone_info["zone_id"] != zone_id:
+                    if curr_zone_info:
+                        old_zone = curr_zone_info["zone_id"]
+                        dwell_ms = int((infer_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
+                        await emitter.emit(
+                            store_id=store_id,
+                            camera_id=camera_id,
+                            visitor_id=visitor_id,
+                            event_type="ZONE_EXIT",
+                            timestamp=infer_ts,
+                            zone_id=old_zone,
+                            dwell_ms=dwell_ms,
+                            is_staff=is_staff_to_emit,
+                            confidence=conf,
+                            session_seq=seq
+                        )
+                    visitor_zones[visitor_id] = {
+                        "zone_id": zone_id,
+                        "enter_time": infer_ts,
+                        "last_dwell_emit_ms": 0,
+                        "dwell_event_count": 0
+                    }
+                    await emitter.emit(
+                        store_id=store_id,
+                        camera_id=camera_id,
+                        visitor_id=visitor_id,
+                        event_type="ZONE_ENTER",
+                        timestamp=infer_ts,
+                        zone_id=zone_id,
+                        is_staff=is_staff_to_emit,
+                        confidence=conf,
+                        session_seq=seq
+                    )
+                    
+                    if zone_id == "BILLING":
+                        billing_count = 0
+                        for other_obj in curr_tracked_objs:
+                            o_box = other_obj["box"]
+                            o_cx = int((o_box[0] + o_box[2]) / 2.0)
+                            o_cy = int((o_box[1] + o_box[3]) / 2.0)
+                            o_zone, _ = get_zone_for_centroid(o_cx, o_cy, frame_w, frame_h, camera_zones)
+                            if o_zone == "BILLING":
+                                billing_count += 1
+                        if billing_count == 0:
+                            billing_count = 1
+                        await emitter.emit(
+                            store_id=store_id,
+                            camera_id=camera_id,
+                            visitor_id=visitor_id,
+                            event_type="BILLING_QUEUE_JOIN",
+                            timestamp=infer_ts,
+                            zone_id=zone_id,
+                            is_staff=is_staff_to_emit,
+                            confidence=conf,
+                            queue_depth=billing_count,
+                            session_seq=seq
+                        )
+                else:
+                    DWELL_INTERVAL_MS = 30_000
+                    time_in_zone_ms = int((infer_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
+                    last_emit_ms = curr_zone_info.get("last_dwell_emit_ms", 0)
+                    intervals_elapsed = (time_in_zone_ms - last_emit_ms) // DWELL_INTERVAL_MS
+                    
+                    if intervals_elapsed >= 1:
+                        for i in range(int(intervals_elapsed)):
+                            interval_dwell_ms = last_emit_ms + (i + 1) * DWELL_INTERVAL_MS
+                            session_sequences[visitor_id] += 1
+                            seq = session_sequences[visitor_id]
+                            await emitter.emit(
+                                store_id=store_id,
+                                camera_id=camera_id,
+                                visitor_id=visitor_id,
+                                event_type="ZONE_DWELL",
+                                timestamp=infer_ts,
+                                zone_id=zone_id,
+                                dwell_ms=interval_dwell_ms,
+                                is_staff=is_staff_to_emit,
+                                confidence=conf,
+                                session_seq=seq
+                            )
+                        visitor_zones[visitor_id]["last_dwell_emit_ms"] = last_emit_ms + int(intervals_elapsed) * DWELL_INTERVAL_MS
+                        visitor_zones[visitor_id]["dwell_event_count"] = curr_zone_info.get("dwell_event_count", 0) + int(intervals_elapsed)
+            else:
+                if curr_zone_info:
+                    old_zone = curr_zone_info["zone_id"]
+                    dwell_ms = int((infer_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
+                    visitor_zones.pop(visitor_id)
+                    await emitter.emit(
+                        store_id=store_id,
+                        camera_id=camera_id,
+                        visitor_id=visitor_id,
+                        event_type="ZONE_EXIT",
+                        timestamp=infer_ts,
+                        zone_id=old_zone,
+                        dwell_ms=dwell_ms,
+                        is_staff=is_staff_to_emit,
+                        confidence=conf,
+                        session_seq=seq
+                    )
+            final_tracked_objs.append(obj)
+            
+        exit_events = session_manager.update_grace_sessions(infer_ts)
+        for ev in exit_events:
+            seq = session_sequences.get(ev["visitor_id"], 0)
+            await emitter.emit(
+                store_id=store_id,
+                camera_id=camera_id,
+                visitor_id=ev["visitor_id"],
+                event_type="EXIT",
+                timestamp=ev["timestamp"],
+                dwell_ms=ev["dwell_ms"],
+                is_staff=ev["is_staff"],
+                confidence=ev["confidence"],
+                session_seq=seq
+            )
+            
+        spatial_registry.prune_old_buckets(infer_ts)
+        tracked_objs = final_tracked_objs
+
+    inference_in_progress = False
+
+    async def run_inference_bg(frame_copy, infer_ts):
+        nonlocal inference_in_progress
+        inference_in_progress = True
+        try:
+            detections = await asyncio.to_thread(detect_objects_sync, frame_copy)
+            await process_detections_and_sync(detections, frame_copy, infer_ts)
+        except Exception as e:
+            logger.exception(f"Error in background inference task: {e}")
+        finally:
+            inference_in_progress = False
+
+    start_wall_time = time_module.time()
+    last_infer_wall_time = 0.0
 
     while cap.isOpened():
+        if real:
+            # Wall-clock pacing to achieve real-time speed by skipping frames
+            elapsed = time_module.time() - start_wall_time
+            target_frame_idx = int(elapsed * fps)
+            if target_frame_idx >= total_frames:
+                if loop:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    start_wall_time = time_module.time()
+                    start_time = datetime.now(timezone.utc)
+                    frame_idx = 0
+                    continue
+                else:
+                    break
+            if target_frame_idx > frame_idx:
+                diff = target_frame_idx - frame_idx
+                if diff < 150:
+                    for _ in range(diff):
+                        cap.grab()
+                    frame_idx = target_frame_idx
+                    frames_skipped += diff
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_idx)
+                    frame_idx = target_frame_idx
+                    frames_skipped += diff
+
         ret, frame = cap.read()
         if not ret:
             if loop:
@@ -520,319 +892,20 @@ async def process_clip(
                 spatial_registry.prune_old_buckets(curr_ts)
                 frames_batch = []
         else:
-            # Real mode: pace by sleeping 1/fps per frame so the clip
-            # plays at real speed regardless of inference cost.
-            await asyncio.sleep(1.0 / fps)
-
-            import time as time_module
-
-            is_infer_frame = (frame_idx % INFER_EVERY == 0)
-
-            if is_infer_frame:
-                frames_processed += 1
-                # Periodic progress log every 60s
-                now_t = time_module.time()
-                if now_t - last_log_time >= 60.0:
-                    last_log_time = now_t
-                    logger.info(f"[{camera_id}] frame={frame_idx}/{total_frames} processed={frames_processed} skipped={frames_skipped}")
-
-                # For real-time live streaming, use current wall-clock time
-                curr_ts = datetime.now(timezone.utc)
-                
-                # --- Perform Track & Detection Inferences ---
-                detections = []
-                
-                if camera_type == "billing":
-                    import torch
-                    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    inputs = rtdetr_processor(images=img_rgb, return_tensors="pt")
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    with torch.no_grad():
-                        outputs = rtdetr_model(**inputs)
-                    
-                    results = rtdetr_processor.post_process_object_detection(
-                        outputs,
-                        target_sizes=[(frame_h, frame_w)],
-                        threshold=conf_threshold
-                    )
-                    
-                    boxes = results[0]["boxes"].cpu().numpy()
-                    labels = results[0]["labels"].cpu().numpy()
-                    scores = results[0]["scores"].cpu().numpy()
-                    
-                    for box, label, score in zip(boxes, labels, scores):
-                        if label == 0:
-                            detections.append({
-                                "box": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
-                                "confidence": float(score)
-                            })
-                else:
-                    results = yolov9_model(frame, classes=[0], verbose=False)
-                    boxes = results[0].boxes
-                    for box in boxes:
-                        cls = int(box.cls[0])
-                        conf = float(box.conf[0])
-                        if cls == 0 and conf >= conf_threshold:
-                            xyxy = box.xyxy[0].cpu().numpy()
-                            x1f, y1f, x2f, y2f = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
-                            bbox_h = y2f - y1f
-                            bbox_w = x2f - x1f
-                            # Filter tiny detections (mirrors, photos, banners):
-                            if bbox_h < 60 or bbox_w < 25:
-                                continue
-                            # Suppress very flat detections
-                            if bbox_h > 0 and (bbox_w / bbox_h) > 3.0:
-                                continue
-                            detections.append({
-                                "box": [x1f, y1f, x2f, y2f],
-                                "confidence": conf
-                            })
-                            
-                # Update tracker
-                tracked_objs, disappeared_track_ids = tracker.update(detections)
-                
-                # Emit exits for disappeared tracks
-                for t_id in disappeared_track_ids:
-                    disappear_events = session_manager.disappear_track(t_id, curr_ts)
-                    for ev in disappear_events:
-                        seq = session_sequences.get(ev["visitor_id"], 0)
-                        await emitter.emit(
-                            store_id=store_id,
-                            camera_id=camera_id,
-                            visitor_id=ev["visitor_id"],
-                            event_type=ev["event_type"],
-                            timestamp=ev["timestamp"],
-                            zone_id=ev["zone_id"],
-                            dwell_ms=ev["dwell_ms"],
-                            is_staff=ev["is_staff"],
-                            confidence=ev["confidence"],
-                            session_seq=seq
-                        )
-                
-                # Process detections in current frame
-                for obj in tracked_objs:
-                    track_id = obj["track_id"]
-                    box = obj["box"]
-                    conf = obj["confidence"]
-                    
-                    # Extract crop for staff classification and Re-ID
-                    x1, y1, x2, y2 = box
-                    x1_c = max(0, int(x1))
-                    y1_c = max(0, int(y1))
-                    x2_c = min(frame_w, int(x2))
-                    y2_c = min(frame_h, int(y2))
-                    
-                    crop = None
-                    is_staff, staff_conf = False, 0.0
-                    if x2_c > x1_c and y2_c > y1_c:
-                        crop = frame[y1_c:y2_c, x1_c:x2_c]
-                        crop_h = crop.shape[0]
-                        upper_limit = max(1, int(crop_h * 0.40))
-                        upper_crop = crop[0:upper_limit, :]
-                        is_staff, staff_conf = classify_staff(upper_crop, staff_hue)
-                    
-                    # Extract mock embedding
-                    embedding = reid_model.extract_embedding(crop, track_id)
-                    
-                    # Check for cross-camera deduplication
-                    should_sup, matched_vid = spatial_registry.should_suppress(
-                        store_id=store_id,
-                        camera_id=camera_id,
-                        box=box,
-                        embedding=embedding,
-                        timestamp=curr_ts,
-                        homography_matrix=homography_matrix
-                    )
-                    
-                    if should_sup:
-                        continue # Suppressed
-                        
-                    # Register track
-                    visitor_id, event_type = session_manager.register_track(
-                        track_id=track_id,
-                        embedding=embedding,
-                        timestamp=curr_ts,
-                        store_id=store_id,
-                        camera_id=camera_id,
-                        is_staff=is_staff,
-                        confidence=conf
-                    )
-                    
-                    # Update staff status on the active session if we detected staff in this frame
-                    if is_staff and visitor_id in session_manager.active_sessions:
-                        session_manager.active_sessions[visitor_id]["is_staff"] = True
-                    
-                    # Register in spatial registry for other cameras
-                    spatial_registry.register_detection(
-                        store_id=store_id,
-                        camera_id=camera_id,
-                        box=box,
-                        embedding=embedding,
-                        visitor_id=visitor_id,
-                        timestamp=curr_ts
-                    )
-                    
-                    # Setup session sequence
-                    if visitor_id not in session_sequences:
-                        session_sequences[visitor_id] = 0
-                    else:
-                        session_sequences[visitor_id] += 1
-                    seq = session_sequences[visitor_id]
-     
-                    # Emit ENTRY or REENTRY if matching state machine
-                    if event_type in ("ENTRY", "REENTRY"):
-                        if event_type == "REENTRY" and visitor_id in session_manager.active_sessions:
-                            session_manager.active_sessions[visitor_id]["reentry"] = True
-                        await emitter.emit(
-                            store_id=store_id,
-                            camera_id=camera_id,
-                            visitor_id=visitor_id,
-                            event_type=event_type,
-                            timestamp=curr_ts,
-                            is_staff=is_staff,
-                            confidence=conf,
-                            session_seq=seq
-                        )
-                        
-                    # Map coordinates to zone
-                    cx = int((box[0] + box[2]) / 2.0)
-                    cy = int((box[1] + box[3]) / 2.0)
-                    zone_id, _ = get_zone_for_centroid(cx, cy, frame_w, frame_h, camera_zones)
-                    
-                    # Handle zone transitions and dwell times
-                    curr_zone_info = visitor_zones.get(visitor_id)
-                    
-                    if zone_id:
-                        # Case A: Entered a new zone or transitioned
-                        if not curr_zone_info or curr_zone_info["zone_id"] != zone_id:
-                            if curr_zone_info:
-                                # Exit old zone
-                                old_zone = curr_zone_info["zone_id"]
-                                dwell_ms = int((curr_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
-                                await emitter.emit(
-                                    store_id=store_id,
-                                    camera_id=camera_id,
-                                    visitor_id=visitor_id,
-                                    event_type="ZONE_EXIT",
-                                    timestamp=curr_ts,
-                                    zone_id=old_zone,
-                                    dwell_ms=dwell_ms,
-                                    is_staff=is_staff,
-                                    confidence=conf,
-                                    session_seq=seq
-                                )
-                                
-                            # Enter new zone
-                            visitor_zones[visitor_id] = {
-                                "zone_id": zone_id,
-                                "enter_time": curr_ts,
-                                "last_dwell_emit_ms": 0,
-                                "dwell_event_count": 0
-                            }
-                            await emitter.emit(
-                                store_id=store_id,
-                                camera_id=camera_id,
-                                visitor_id=visitor_id,
-                                event_type="ZONE_ENTER",
-                                timestamp=curr_ts,
-                                zone_id=zone_id,
-                                is_staff=is_staff,
-                                confidence=conf,
-                                session_seq=seq
-                            )
-                            
-                            # Special Case: joined billing queue
-                            if zone_id == "BILLING":
-                                # Count tracks currently in the billing zone
-                                billing_count = 0
-                                for other_obj in tracked_objs:
-                                    o_box = other_obj["box"]
-                                    o_cx = int((o_box[0] + o_box[2]) / 2.0)
-                                    o_cy = int((o_box[1] + o_box[3]) / 2.0)
-                                    o_zone, _ = get_zone_for_centroid(o_cx, o_cy, frame_w, frame_h, camera_zones)
-                                    if o_zone == "BILLING":
-                                        billing_count += 1
-                                if billing_count == 0:
-                                    billing_count = 1
-                                
-                                # Emit BILLING_QUEUE_JOIN
-                                await emitter.emit(
-                                    store_id=store_id,
-                                    camera_id=camera_id,
-                                    visitor_id=visitor_id,
-                                    event_type="BILLING_QUEUE_JOIN",
-                                    timestamp=curr_ts,
-                                    zone_id=zone_id,
-                                    is_staff=is_staff,
-                                    confidence=conf,
-                                    queue_depth=billing_count,
-                                    session_seq=seq
-                                )
-                                
-                        # Case B: Already in this zone — emit ZONE_DWELL every 30s interval
-                        else:
-                            DWELL_INTERVAL_MS = 30_000
-                            time_in_zone_ms = int((curr_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
-                            last_emit_ms = curr_zone_info.get("last_dwell_emit_ms", 0)
-                            intervals_elapsed = (time_in_zone_ms - last_emit_ms) // DWELL_INTERVAL_MS
-                            
-                            if intervals_elapsed >= 1:
-                                for i in range(int(intervals_elapsed)):
-                                    interval_dwell_ms = last_emit_ms + (i + 1) * DWELL_INTERVAL_MS
-                                    session_sequences[visitor_id] += 1
-                                    seq = session_sequences[visitor_id]
-                                    await emitter.emit(
-                                        store_id=store_id,
-                                        camera_id=camera_id,
-                                        visitor_id=visitor_id,
-                                        event_type="ZONE_DWELL",
-                                        timestamp=curr_ts,
-                                        zone_id=zone_id,
-                                        dwell_ms=interval_dwell_ms,
-                                        is_staff=is_staff,
-                                        confidence=conf,
-                                        session_seq=seq
-                                    )
-                                visitor_zones[visitor_id]["last_dwell_emit_ms"] = last_emit_ms + int(intervals_elapsed) * DWELL_INTERVAL_MS
-                                visitor_zones[visitor_id]["dwell_event_count"] = curr_zone_info.get("dwell_event_count", 0) + int(intervals_elapsed)
-                    else:
-                        # Centroid is unzoned, check if exited previous zone
-                        if curr_zone_info:
-                            old_zone = curr_zone_info["zone_id"]
-                            dwell_ms = int((curr_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
-                            visitor_zones.pop(visitor_id)
-                            await emitter.emit(
-                                store_id=store_id,
-                                camera_id=camera_id,
-                                visitor_id=visitor_id,
-                                event_type="ZONE_EXIT",
-                                timestamp=curr_ts,
-                                zone_id=old_zone,
-                                dwell_ms=dwell_ms,
-                                is_staff=is_staff,
-                                confidence=conf,
-                                session_seq=seq
-                            )
-
-                # Evaluate grace sessions & exits
-                exit_events = session_manager.update_grace_sessions(curr_ts)
-                for ev in exit_events:
-                    seq = session_sequences.get(ev["visitor_id"], 0)
-                    await emitter.emit(
-                        store_id=store_id,
-                        camera_id=camera_id,
-                        visitor_id=ev["visitor_id"],
-                        event_type="EXIT",
-                        timestamp=ev["timestamp"],
-                        dwell_ms=ev["dwell_ms"],
-                        is_staff=ev["is_staff"],
-                        confidence=ev["confidence"],
-                        session_seq=seq
-                    )
-                    
-                spatial_registry.prune_old_buckets(curr_ts)
+            # Real mode: pace by sleeping to match dynamic wall-clock time
+            expected_wall_time = start_wall_time + (frame_idx / fps)
+            sleep_dur = expected_wall_time - time_module.time()
+            if sleep_dur > 0:
+                await asyncio.sleep(sleep_dur)
             else:
-                frames_skipped += 1
+                await asyncio.sleep(0.001)
+
+            # Trigger inference if it is time and previous inference is done
+            now_wall = time_module.time()
+            if now_wall - last_infer_wall_time >= 1.0 and not inference_in_progress:
+                last_infer_wall_time = now_wall
+                curr_ts = datetime.now(timezone.utc)
+                asyncio.create_task(run_inference_bg(frame.copy(), curr_ts))
 
             # Always push the annotated frame to the stream (at STREAM_INTERVAL speed)
             if api_url:
