@@ -14,6 +14,7 @@ htmlcov/
 
 # Data and Outputs
 output/*.jsonl
+output/*.log
 !output/.gitkeep
 data/pos_transactions.csv
 data/store_layout.json
