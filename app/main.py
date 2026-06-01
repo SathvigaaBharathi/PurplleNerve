@@ -120,6 +120,28 @@ async def structured_logging_middleware(request: Request, call_next):
     return response
 
 # Server-Sent Events stream endpoint
+async def build_stream_payload(store_id: str, db, redis=None) -> dict:
+    from app.metrics import compute_metrics_data
+    from app.anomalies import get_active_anomalies_data
+    from app.funnel import compute_funnel_data
+    from app.health import get_active_cameras
+    from datetime import datetime
+    
+    metrics = await compute_metrics_data(store_id, db)
+    anomalies = await get_active_anomalies_data(store_id, db)
+    funnel = await compute_funnel_data(store_id, db)
+    active_cameras = await get_active_cameras(store_id, db)
+    
+    return {
+        "metrics": metrics,
+        "anomalies": anomalies,
+        "funnel": funnel,
+        "active_cameras": active_cameras,
+        "camera_count": len(active_cameras),
+        "server_ts": datetime.utcnow().isoformat() + "Z",
+        "ping": True
+    }
+
 @app.get("/stores/{store_id}/stream")
 async def event_stream(store_id: str, redis: Redis = Depends(get_redis)):
     """
@@ -147,16 +169,7 @@ async def event_stream(store_id: str, redis: Redis = Depends(get_redis)):
             # We use local sessions to prevent connection leaks across streaming cycles
             async with AsyncSessionLocal() as db:
                 try:
-                    metrics = await compute_metrics_data(store_id, db)
-                    anomalies = await get_active_anomalies_data(store_id, db)
-                    funnel = await compute_funnel_data(store_id, db)
-                    
-                    payload = {
-                        "metrics": metrics,
-                        "anomalies": anomalies,
-                        "funnel": funnel
-                    }
-                    
+                    payload = await build_stream_payload(store_id, db, redis)
                     yield f"data: {json.dumps(payload)}\n\n"
                 except Exception as e:
                     logger.error(f"Error generating SSE data: {e}")
@@ -191,110 +204,12 @@ async def pos_correlation_loop():
     while True:
         await asyncio.sleep(60)
         try:
+            from app.redis_client import get_redis
+            redis = await get_redis()
             async with AsyncSessionLocal() as db:
-                await correlate_transactions(db)
+                await correlate_transactions(db, redis)
         except Exception as e:
             logger.error(f"Error in background POS correlation loop: {e}")
-
-# Background worker for mock real-time events for Delhi and Mumbai stores
-async def mock_realtime_generator_loop():
-    import random
-    import string
-    
-    if "PYTEST_CURRENT_TEST" in os.environ:
-        return
-        
-    logger.info("Starting background mock event generator loop for Delhi/Mumbai stores...")
-    
-    active_visitors = {
-        "STORE_MUM_001": [],
-        "STORE_DEL_003": []
-    }
-    
-    # Pre-populate some visitors
-    for store in active_visitors:
-        for _ in range(5):
-            vid = f"VIS_{store.split('_')[1]}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
-            active_visitors[store].append(vid)
-            
-    while True:
-        await asyncio.sleep(4)
-        try:
-            # Pick a store
-            store_id = random.choice(["STORE_MUM_001", "STORE_DEL_003"])
-            
-            # Select camera & event
-            event_type = random.choice([
-                "ENTRY", "ZONE_ENTER", "ZONE_DWELL", "BILLING_QUEUE_JOIN", 
-                "BILLING_QUEUE_LEAVE", "ZONE_EXIT", "EXIT"
-            ])
-            
-            visitors = active_visitors[store_id]
-            
-            if event_type == "ENTRY" or not visitors:
-                visitor_id = f"VIS_{store_id.split('_')[1]}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
-                visitors.append(visitor_id)
-                camera_id = "CAM_ENTRY_01"
-                zone_id = None
-                dwell_ms = 0
-                queue_depth = None
-            else:
-                visitor_id = random.choice(visitors)
-                if event_type == "EXIT":
-                    if visitor_id in visitors:
-                        visitors.remove(visitor_id)
-                    camera_id = "CAM_ENTRY_01"
-                    zone_id = None
-                    dwell_ms = random.randint(10000, 180000)
-                    queue_depth = None
-                elif event_type == "BILLING_QUEUE_JOIN":
-                    camera_id = "CAM_BILLING_01"
-                    zone_id = "BILLING"
-                    dwell_ms = 0
-                    queue_depth = random.randint(1, 5)
-                elif event_type == "ZONE_ENTER":
-                    camera_id = "CAM_FLOOR_01"
-                    zone_id = random.choice(["SKINCARE", "MOISTURISER"])
-                    dwell_ms = 0
-                    queue_depth = None
-                elif event_type == "ZONE_DWELL":
-                    camera_id = "CAM_FLOOR_01"
-                    zone_id = random.choice(["SKINCARE", "MOISTURISER"])
-                    dwell_ms = random.randint(15000, 60000)
-                    queue_depth = None
-                else: # ZONE_EXIT / LEAVE
-                    camera_id = "CAM_FLOOR_01" if event_type == "ZONE_EXIT" else "CAM_BILLING_01"
-                    zone_id = "BILLING" if camera_id == "CAM_BILLING_01" else random.choice(["SKINCARE", "MOISTURISER"])
-                    dwell_ms = random.randint(20000, 120000)
-                    queue_depth = None
-            
-            # Insert event
-            async with AsyncSessionLocal() as db:
-                from app.db import DBEvent
-                ev = DBEvent(
-                    event_id=str(uuid.uuid4()),
-                    store_id=store_id,
-                    camera_id=camera_id,
-                    visitor_id=visitor_id,
-                    event_type=event_type,
-                    timestamp=datetime.now(timezone.utc),
-                    zone_id=zone_id,
-                    dwell_ms=dwell_ms,
-                    is_staff=random.random() < 0.08,
-                    confidence=round(random.uniform(0.6, 0.98), 2),
-                    queue_depth=queue_depth,
-                    session_seq=random.randint(0, 4)
-                )
-                db.add(ev)
-                await db.commit()
-                
-                # Refresh aggregated view if zone_dwell was added
-                if event_type == "ZONE_DWELL":
-                    await db.execute(text("REFRESH MATERIALIZED VIEW CONCURRENTLY zone_dwell_agg;"))
-                    await db.commit()
-                    
-        except Exception as e:
-            logger.error(f"Error in mock realtime event generator: {e}")
 
 # GET /stores/{store_id}/events - Endpoint for fetching recent events
 @app.get("/stores/{store_id}/events")
@@ -364,6 +279,29 @@ async def startup_event():
                 
     # 4. Fire background correlation task
     asyncio.create_task(pos_correlation_loop())
-    
-    # 5. Fire background mock event generator loop for Delhi/Mumbai
-    asyncio.create_task(mock_realtime_generator_loop())
+
+
+    # 6. Load store layout cameras for health check camera list
+    try:
+        from app.health import ALL_KNOWN_CAMERAS
+        paths = [
+            "data/store_layout.json",
+            "/app/data/store_layout.json",
+            "../data/store_layout.json",
+            "store-intelligence/data/store_layout.json",
+            "D:/purplle/store-intelligence/data/store_layout.json"
+        ]
+        layout = None
+        for p in paths:
+            if os.path.exists(p):
+                with open(p, "r") as f:
+                    layout = json.load(f)
+                break
+        if layout:
+            for s_id, store_data in layout.items():
+                if isinstance(store_data, dict) and "cameras" in store_data:
+                    cameras_dict = store_data.get("cameras", {})
+                    if isinstance(cameras_dict, dict):
+                        ALL_KNOWN_CAMERAS[s_id] = list(cameras_dict.keys())
+    except Exception as e:
+        logger.error(f"Failed to load store layout cameras on startup: {e}")

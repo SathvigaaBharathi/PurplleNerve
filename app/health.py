@@ -18,6 +18,41 @@ logger = logging.getLogger(__name__)
 # Global start time for uptime calculation
 START_TIME = time.time()
 
+ALL_KNOWN_CAMERAS = {}
+
+def ensure_all_known_cameras():
+    if not ALL_KNOWN_CAMERAS:
+        try:
+            layout = load_store_layout()
+            for store_id, store_data in layout.items():
+                if isinstance(store_data, dict) and "cameras" in store_data:
+                    cameras_dict = store_data.get("cameras", {})
+                    if isinstance(cameras_dict, dict):
+                        ALL_KNOWN_CAMERAS[store_id] = list(cameras_dict.keys())
+        except Exception as e:
+            logger.error(f"Error ensuring ALL_KNOWN_CAMERAS: {e}")
+
+async def get_active_cameras(store_id: str, db: AsyncSession) -> list[str]:
+    """
+    Returns list of camera_ids that have sent at least one event
+    in the last 10 minutes for this store.
+    Uses the same STALE_FEED threshold as GET /health.
+    Never hardcodes camera IDs — always derived from events table.
+    """
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import select, distinct
+    from app.db import DBEvent
+    
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+    result = await db.execute(
+        select(distinct(DBEvent.camera_id))
+        .where(DBEvent.store_id == store_id)
+        .where(DBEvent.is_staff == False)
+        .where(DBEvent.ingested_at >= cutoff)
+        .order_by(DBEvent.camera_id)
+    )
+    return [row[0] for row in result.fetchall()]
+
 def load_store_layout():
     paths = [
         "data/store_layout.json",
@@ -135,29 +170,37 @@ async def health_check(
             res_count = await db.execute(q_count)
             count_last_hour = res_count.scalar_one() or 0
             
+            ensure_all_known_cameras()
+            active_cameras = await get_active_cameras(store_id, db)
+            stale_cameras = [
+                cam for cam in ALL_KNOWN_CAMERAS.get(store_id, [])
+                if cam not in active_cameras
+            ]
+            
+            in_open_hours = is_within_open_hours(layout, store_id, now_dt)
+            
             feed_status = "LIVE"
-            if last_ts:
-                # Calculate lag in minutes
-                # Make sure both datetimes are timezone-aware
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=timezone.utc)
-                lag_minutes = (now_dt - last_ts).total_seconds() / 60.0
-                
-                # Check open hours
-                in_open_hours = is_within_open_hours(layout, store_id, now_dt)
-                
-                if lag_minutes > 10.0 and in_open_hours:
+            if in_open_hours and stale_cameras:
+                feed_status = "STALE"
+            elif not ALL_KNOWN_CAMERAS.get(store_id, []):
+                # Fallback if layout not loaded / no cameras mapped
+                if last_ts:
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=timezone.utc)
+                    lag_minutes = (now_dt - last_ts).total_seconds() / 60.0
+                    if lag_minutes > 10.0 and in_open_hours:
+                        feed_status = "STALE"
+                else:
                     feed_status = "STALE"
-                    
-                last_event_str = last_ts.isoformat()
-            else:
-                last_event_str = None
-                feed_status = "STALE" # No events at all -> stale
+            
+            last_event_str = last_ts.isoformat() if last_ts else None
                 
             stores_health[store_id] = {
                 "last_event_at": last_event_str,
                 "feed_status": feed_status,
-                "events_last_hour": count_last_hour
+                "events_last_hour": count_last_hour,
+                "active_cameras": active_cameras,
+                "stale_cameras": stale_cameras
             }
     except Exception as e:
         logger.error(f"Error calculating store feeds health: {e}")

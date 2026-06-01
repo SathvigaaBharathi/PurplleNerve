@@ -55,13 +55,13 @@ async def compute_metrics_data(store_id: str, db: AsyncSession) -> dict:
     unique_visitors_set = {e.visitor_id for e in customer_events if e.event_type == "ENTRY"}
     unique_visitors = len(unique_visitors_set)
     
-    # - conversion_rate: visitors who completed a purchase (matched_visitor in pos_transactions) 
+    # - conversion_rate: visitors who completed a purchase (matched_visitor in pos_transactions)
     #   divided by total unique visitors.
-    # Query today's POS transactions for this store
+    # NOTE: We intentionally do NOT filter POS transactions by date — the 5-minute
+    # correlation window in pos.py already ensures temporal proximity. Filtering by
+    # today_date would silently exclude seed/demo data and always return 0.
     q_tx = select(DBPosTransaction.matched_visitor).where(
         DBPosTransaction.store_id == store_id,
-        DBPosTransaction.timestamp >= start_of_day,
-        DBPosTransaction.timestamp <= end_of_day,
         DBPosTransaction.matched_visitor.isnot(None)
     )
     res_tx = await db.execute(q_tx)

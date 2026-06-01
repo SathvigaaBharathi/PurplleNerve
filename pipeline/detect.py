@@ -443,7 +443,8 @@ async def process_clip(
                         visitor_zones[visitor_id] = {
                             "zone_id": zone_id,
                             "enter_time": curr_ts,
-                            "last_dwell_emit_time": curr_ts
+                            "last_dwell_emit_ms": 0,
+                            "dwell_event_count": 0
                         }
                         await emitter.emit(
                             store_id=store_id,
@@ -485,25 +486,32 @@ async def process_clip(
                                 session_seq=seq
                             )
                             
-                    # Case B: Already in this zone, check for ZONE_DWELL (every 30 seconds)
+                    # Case B: Already in this zone — emit ZONE_DWELL every 30s interval
                     else:
-                        time_in_zone = (curr_ts - curr_zone_info["enter_time"]).total_seconds()
-                        time_since_last_dwell = (curr_ts - curr_zone_info["last_dwell_emit_time"]).total_seconds()
+                        DWELL_INTERVAL_MS = 30_000
+                        time_in_zone_ms = int((curr_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
+                        last_emit_ms = curr_zone_info.get("last_dwell_emit_ms", 0)
+                        intervals_elapsed = (time_in_zone_ms - last_emit_ms) // DWELL_INTERVAL_MS
                         
-                        if time_in_zone >= 30.0 and time_since_last_dwell >= 30.0:
-                            visitor_zones[visitor_id]["last_dwell_emit_time"] = curr_ts
-                            await emitter.emit(
-                                store_id=store_id,
-                                camera_id=camera_id,
-                                visitor_id=visitor_id,
-                                event_type="ZONE_DWELL",
-                                timestamp=curr_ts,
-                                zone_id=zone_id,
-                                dwell_ms=int(time_in_zone * 1000),
-                                is_staff=is_staff,
-                                confidence=conf,
-                                session_seq=seq
-                            )
+                        if intervals_elapsed >= 1:
+                            for i in range(int(intervals_elapsed)):
+                                interval_dwell_ms = last_emit_ms + (i + 1) * DWELL_INTERVAL_MS
+                                session_sequences[visitor_id] += 1
+                                seq = session_sequences[visitor_id]
+                                await emitter.emit(
+                                    store_id=store_id,
+                                    camera_id=camera_id,
+                                    visitor_id=visitor_id,
+                                    event_type="ZONE_DWELL",
+                                    timestamp=curr_ts,
+                                    zone_id=zone_id,
+                                    dwell_ms=interval_dwell_ms,
+                                    is_staff=is_staff,
+                                    confidence=conf,
+                                    session_seq=seq
+                                )
+                            visitor_zones[visitor_id]["last_dwell_emit_ms"] = last_emit_ms + int(intervals_elapsed) * DWELL_INTERVAL_MS
+                            visitor_zones[visitor_id]["dwell_event_count"] = curr_zone_info.get("dwell_event_count", 0) + int(intervals_elapsed)
                 else:
                     # Centroid is unzoned, check if exited previous zone
                     if curr_zone_info:
@@ -696,7 +704,8 @@ async def process_clip(
                             visitor_zones[visitor_id] = {
                                 "zone_id": zone_id,
                                 "enter_time": curr_ts,
-                                "last_dwell_emit_time": curr_ts
+                                "last_dwell_emit_ms": 0,
+                                "dwell_event_count": 0
                             }
                             await emitter.emit(
                                 store_id=store_id,
@@ -726,25 +735,32 @@ async def process_clip(
                                     session_seq=seq
                                 )
                                 
-                        # Case B: Already in this zone, check for ZONE_DWELL (every 30 seconds)
+                        # Case B: Already in this zone — emit ZONE_DWELL every 30s interval
                         else:
-                            time_in_zone = (curr_ts - curr_zone_info["enter_time"]).total_seconds()
-                            time_since_last_dwell = (curr_ts - curr_zone_info["last_dwell_emit_time"]).total_seconds()
+                            DWELL_INTERVAL_MS = 30_000
+                            time_in_zone_ms = int((curr_ts - curr_zone_info["enter_time"]).total_seconds() * 1000)
+                            last_emit_ms = curr_zone_info.get("last_dwell_emit_ms", 0)
+                            intervals_elapsed = (time_in_zone_ms - last_emit_ms) // DWELL_INTERVAL_MS
                             
-                            if time_in_zone >= 30.0 and time_since_last_dwell >= 30.0:
-                                visitor_zones[visitor_id]["last_dwell_emit_time"] = curr_ts
-                                await emitter.emit(
-                                    store_id=store_id,
-                                    camera_id=camera_id,
-                                    visitor_id=visitor_id,
-                                    event_type="ZONE_DWELL",
-                                    timestamp=curr_ts,
-                                    zone_id=zone_id,
-                                    dwell_ms=int(time_in_zone * 1000),
-                                    is_staff=is_staff,
-                                    confidence=conf,
-                                    session_seq=seq
-                                )
+                            if intervals_elapsed >= 1:
+                                for i in range(int(intervals_elapsed)):
+                                    interval_dwell_ms = last_emit_ms + (i + 1) * DWELL_INTERVAL_MS
+                                    session_sequences[visitor_id] += 1
+                                    seq = session_sequences[visitor_id]
+                                    await emitter.emit(
+                                        store_id=store_id,
+                                        camera_id=camera_id,
+                                        visitor_id=visitor_id,
+                                        event_type="ZONE_DWELL",
+                                        timestamp=curr_ts,
+                                        zone_id=zone_id,
+                                        dwell_ms=interval_dwell_ms,
+                                        is_staff=is_staff,
+                                        confidence=conf,
+                                        session_seq=seq
+                                    )
+                                visitor_zones[visitor_id]["last_dwell_emit_ms"] = last_emit_ms + int(intervals_elapsed) * DWELL_INTERVAL_MS
+                                visitor_zones[visitor_id]["dwell_event_count"] = curr_zone_info.get("dwell_event_count", 0) + int(intervals_elapsed)
                     else:
                         # Centroid is unzoned, check if exited previous zone
                         if curr_zone_info:
