@@ -398,6 +398,121 @@ async def get_recent_events(store_id: str, db = Depends(get_db)):
         })
     return events_list
 
+# Demo Playback Logic for Cloud Deployments
+active_demo_tasks = {}
+
+async def play_demo_events(store_id: str):
+    from app.db import DBEvent
+    from app.models import RetailEvent
+    from app.redis_client import get_redis, emit_event
+    from sqlalchemy.dialects.postgresql import insert
+    
+    paths = [
+        "data/events.jsonl",
+        "/app/data/events.jsonl",
+        "../data/events.jsonl",
+        "store-intelligence/data/events.jsonl"
+    ]
+    events_file = None
+    for p in paths:
+        if os.path.exists(p):
+            events_file = p
+            break
+            
+    if not events_file:
+        logger.error("Demo events.jsonl file not found.")
+        return
+        
+    logger.info(f"Starting demo playback for {store_id}...")
+    try:
+        events = []
+        with open(events_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    events.append(json.loads(line))
+                    
+        redis = await get_redis()
+        visitor_map = {}
+        
+        for ev in events:
+            if store_id not in active_demo_tasks:
+                break # stopped / cancelled
+                
+            if ev.get("store_id") != store_id:
+                continue
+                
+            # Dynamic timestamp alignment
+            now = datetime.now(timezone.utc)
+            ev["timestamp"] = now.isoformat().replace("+00:00", "Z")
+            
+            # Regenerate event_id to prevent database duplication (idempotency)
+            ev["event_id"] = str(uuid.uuid4())
+            
+            # Keep visitor sessions linked, but map them to a fresh visitor ID
+            old_vid = ev["visitor_id"]
+            if old_vid not in visitor_map:
+                visitor_map[old_vid] = f"DEMO_{str(uuid.uuid4())[:8]}"
+            ev["visitor_id"] = visitor_map[old_vid]
+            
+            try:
+                validated_ev = RetailEvent.model_validate(ev)
+                
+                db_obj = {
+                    "event_id": validated_ev.event_id,
+                    "store_id": validated_ev.store_id,
+                    "camera_id": validated_ev.camera_id,
+                    "visitor_id": validated_ev.visitor_id,
+                    "event_type": validated_ev.event_type,
+                    "timestamp": validated_ev.timestamp,
+                    "zone_id": validated_ev.zone_id,
+                    "dwell_ms": validated_ev.dwell_ms,
+                    "is_staff": validated_ev.is_staff,
+                    "confidence": validated_ev.confidence,
+                    "queue_depth": validated_ev.metadata.queue_depth,
+                    "sku_zone": validated_ev.metadata.sku_zone,
+                    "session_seq": validated_ev.metadata.session_seq
+                }
+                
+                async with AsyncSessionLocal() as db:
+                    stmt = insert(DBEvent).values(db_obj).on_conflict_do_nothing(index_elements=["event_id"])
+                    await db.execute(stmt)
+                    await db.commit()
+                    
+                    if validated_ev.event_type == "ZONE_DWELL":
+                        await db.execute(text("REFRESH MATERIALIZED VIEW CONCURRENTLY zone_dwell_agg;"))
+                        await db.commit()
+                        
+                await emit_event(redis, validated_ev)
+            except Exception as ev_err:
+                logger.error(f"Error executing demo event validation: {ev_err}")
+                
+            # Sleep 1 second per event to simulate live camera outputs
+            await asyncio.sleep(1.0)
+            
+    except Exception as e:
+        logger.error(f"Error in demo playback thread: {e}")
+    finally:
+        active_demo_tasks.pop(store_id, None)
+        logger.info(f"Demo playback for {store_id} stopped.")
+
+@app.post("/stores/{store_id}/demo/start")
+async def start_demo(store_id: str):
+    """Starts simulated real-time event playback from events.jsonl in a background task."""
+    if store_id in active_demo_tasks:
+        return {"status": "already_running", "message": "Demo is already playing for this store."}
+    task = asyncio.create_task(play_demo_events(store_id))
+    active_demo_tasks[store_id] = task
+    return {"status": "success", "message": f"Demo playback started for {store_id}."}
+
+@app.post("/stores/{store_id}/demo/stop")
+async def stop_demo(store_id: str):
+    """Stops the active simulated real-time event playback."""
+    if store_id in active_demo_tasks:
+        task = active_demo_tasks.pop(store_id)
+        task.cancel()
+        return {"status": "success", "message": f"Demo playback stopped for {store_id}."}
+    return {"status": "not_running", "message": "No active demo playing for this store."}
+
 # Include Routers
 app.include_router(health_router)
 app.include_router(ingestion_router)

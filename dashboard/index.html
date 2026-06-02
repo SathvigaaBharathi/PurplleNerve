@@ -304,6 +304,20 @@
       const [eventsPerMin, setEventsPerMin] = useState(0);
       const [activeCameras, setActiveCameras] = useState([]);
       const [activeVideoCam, setActiveVideoCam] = useState("CAM_ENTRY_01");
+      const [isDemoPlaying, setIsDemoPlaying] = useState(false);
+
+      const toggleDemo = async () => {
+        try {
+          const action = isDemoPlaying ? 'stop' : 'start';
+          const res = await fetch(`/stores/${storeId}/demo/${action}`, { method: 'POST' });
+          const json = await res.json();
+          if (json.status === 'success') {
+            setIsDemoPlaying(!isDemoPlaying);
+          }
+        } catch (e) {
+          console.error("Failed to toggle demo:", e);
+        }
+      };
 
       const eventCountRef = useRef(0);
       const eventTimestampsRef = useRef([]);
@@ -879,6 +893,52 @@
                   Broker & DB
                 </span>
                 <span className="status-val">Redis + Postgres</span>
+              </div>
+
+              {/* Autopilot Demo Section */}
+              <div className="status-item" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '0.6rem', marginTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '1rem' }}>
+                <span className="sidebar-label" style={{ margin: 0 }}>Autopilot Demo Playback</span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                  Simulate real-time visitor flow events natively or in cloud environments without GPU edge requirements.
+                </span>
+                <button
+                  onClick={toggleDemo}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.8rem',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-color)',
+                    background: isDemoPlaying ? 'rgba(239, 68, 68, 0.15)' : 'rgba(186, 117, 255, 0.15)',
+                    color: isDemoPlaying ? '#ef4444' : 'var(--purplle-light)',
+                    fontSize: '0.78rem',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.4rem',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  {isDemoPlaying ? (
+                    <>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: '#ef4444',
+                        display: 'inline-block',
+                        boxShadow: '0 0 8px #ef4444'
+                      }}></span>
+                      Stop Demo Stream
+                    </>
+                  ) : (
+                    <>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      Play Demo Stream
+                    </>
+                  )}
+                </button>
               </div>
             </div>
           </aside>
