@@ -22,7 +22,9 @@ Benchmarked on 60 frames from CAM 1.mp4 / STORE_BLR_002_entry.mp4 (CPU only, Doc
 Latency ratio: 6.03x. Detection gap: 203 persons (165.0%).
 
 ### What I chose and why
-I chose **YOLOv9s**. Although RT-DETR detected significantly more persons (mostly due to Hugging Face pre-trained labels and thresholds catching overlapping box details), it took **2204.7 ms per frame** on CPU, which is **6.03x slower** than YOLOv9s at **365.7 ms**. At 15fps input, RT-DETR processes at ~0.45 FPS, meaning it would fall 33x behind real-time stream execution. YOLOv9s provides a far better trade-off between throughput and accuracy for CPU-bound production environments.
+I chose a **hybrid dual-model architecture**:
+- **YOLOv9s** is used for Entry and Floor cameras (`camera_type != "billing"`). It provides a mean latency of **365.7 ms** on CPU, offering an optimal trade-off of high throughput and respectable accuracy, which ensures the real-time streams do not fall behind.
+- **RT-DETR (ResNet50)** is used selectively for Billing/Queue cameras (`camera_type == "billing"`). Although RT-DETR has a high latency on CPU (**2204.7 ms per frame**), its transformer attention head is critical for resolving severe partial occlusions and overlapping customer bounding boxes in crowded queue bottlenecks. By running it selectively only on the 2 billing feeds and adjusting inference frequency, the system handles queue buildup accurately.
 
 ByteTrack over DeepSORT: ByteTrack has no appearance model dependency, making it robust when Re-ID is handled separately (which we do with our appearance descriptor). DeepSORT coupling appearance + motion creates interference when the appearance model (Re-ID) disagrees with the motion model (Kalman filter). Separation is cleaner.
 

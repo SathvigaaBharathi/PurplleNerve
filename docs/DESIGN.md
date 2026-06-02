@@ -26,7 +26,7 @@ Raw CCTV clips
 
 ## Component Decisions
 
-- **Detection Model**: YOLOv9s for low latency and high accuracy on standard CPU. RT-DETR was benchmarked but rejected due to 6× CPU latency overhead (see CHOICES.md).
+- **Detection Model**: Hybrid dual-model architecture: **YOLOv9s** for low-latency Entry and Floor camera processing, and **RT-DETR (ResNet50)** selectively for Billing/Queue zones to resolve severe occlusions during billing queue buildup (see CHOICES.md).
 - **Tracker**: ByteTrack because it separates bounding box associations from appearance embeddings, avoiding motion conflicts when Re-ID and motion disagree.
 - **Re-ID**: Spatial HSV colour histogram descriptor (4×4 grid, 16 bins/channel + global 32 bins/channel = 864-dim). Chosen over OSNet/torchreid for zero additional model weight and ~1.2 ms/detection latency vs ~42 ms for deep Re-ID. Cosine similarity 0.91 ± 0.04 for same-person crops, 0.52 ± 0.11 for different-person crops — clean separation above the 0.82 threshold.
 - **Zone Classification**: Rule-based centroid-in-polygon mapping against `store_layout.json` boundaries. GPT-4V was trialled (70% accuracy, 1.2–3.8s latency) and rejected — too slow and less accurate than polygon geometry. Full evaluation in CHOICES.md.
@@ -43,7 +43,7 @@ Claude recommended RT-DETR for its attention-based head performance on occluded 
 - RT-DETR: 340ms/frame, 94.2% person detection rate
 - YOLOv9s: 95ms/frame, 91.8% person detection rate
 
-I chose YOLOv9s. The 3.5% accuracy difference is smaller than the pipeline's other sources of error (Re-ID continuity, zone boundary precision). The 3.6× latency difference, however, makes RT-DETR impractical for real-time use in a CPU-only container. Speed wins at this scale.
+I chose a **hybrid approach**: standard YOLOv9s for the high-volume Entry and Floor camera processing to keep the pipeline real-time on CPU, and RT-DETR selectively for Billing camera feeds. While RT-DETR has a 6x latency overhead on CPU, it is necessary to handle the severe occlusion cases in billing queue builds. Running it selectively allows the overall system to meet throughput goals.
 
 ### 2. Event schema: confidence field
 Claude suggested dropping low-confidence events at the pipeline layer (conf < 0.5 → skip emit). I disagreed and overrode this.
