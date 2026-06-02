@@ -32,11 +32,18 @@ def main():
     
     db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/retail_intelligence")
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    
+    # Rewrite docker-specific hostnames to localhost for native local execution
+    if "@postgres:" in db_url:
+        db_url = db_url.replace("@postgres:", "@127.0.0.1:").replace("retail:retail_secret", "postgres:postgres")
+    if "//redis:" in redis_url:
+        redis_url = redis_url.replace("//redis:", "//127.0.0.1:")
+        
     clips_dir = os.getenv("CCTV_CLIPS_DIR", "CCTV Footage")
     api_url = os.getenv("API_URL", "http://127.0.0.1:8000")
     
     print("=" * 60)
-    print("🔮 PurplleNerve: Local Orchestrator Service")
+    print("[*] PurplleNerve: Local Orchestrator Service")
     print("=" * 60)
     print(f"PostgreSQL DB URL:  {db_url}")
     print(f"Redis Cache Broker:  {redis_url}")
@@ -110,7 +117,7 @@ def main():
         time.sleep(2)
         
     print("\n" + "=" * 60)
-    print("🚀 All services and camera pipelines are active!")
+    print("[*] All services and camera pipelines are active!")
     print("   Dashboard: http://127.0.0.1:8000/dashboard")
     print("   Press Ctrl+C to terminate all processes cleanly.")
     print("=" * 60 + "\n")
