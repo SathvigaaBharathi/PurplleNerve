@@ -92,3 +92,30 @@ async def test_pos_load_endpoint_missing_file_returns_success(client):
     assert "status" in data
     assert "loaded_transactions" in data
     assert data["loaded_transactions"] >= 0
+
+
+async def test_demo_playback_start_and_stop(client):
+    """Test start and stop simulated demo playback endpoints."""
+    try:
+        # Test STORE_BLR_002 endpoint
+        res = await client.post("/stores/STORE_BLR_002/demo/start")
+        assert res.status_code == 200
+        assert res.json()["status"] in ("success", "already_running")
+
+        res = await client.post("/stores/STORE_BLR_002/demo/stop")
+        assert res.status_code == 200
+        assert res.json()["status"] == "success"
+
+        # Test /pos/demo endpoint
+        res = await client.post("/pos/demo")
+        assert res.status_code == 200
+        assert res.json()["status"] in ("success", "already_running")
+
+        res = await client.post("/pos/demo/stop")
+        assert res.status_code == 200
+        assert res.json()["status"] == "success"
+    finally:
+        # Guarantee demo is stopped to avoid leakage
+        await client.post("/stores/STORE_BLR_002/demo/stop")
+        await client.post("/pos/demo/stop")
+

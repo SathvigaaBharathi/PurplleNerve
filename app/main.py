@@ -513,6 +513,26 @@ async def stop_demo(store_id: str):
         return {"status": "success", "message": f"Demo playback stopped for {store_id}."}
     return {"status": "not_running", "message": "No active demo playing for this store."}
 
+@app.post("/pos/demo")
+async def pos_demo_start():
+    """Starts simulated real-time event playback from events.jsonl for STORE_BLR_002."""
+    store_id = "STORE_BLR_002"
+    if store_id in active_demo_tasks:
+        return {"status": "already_running", "message": "Demo is already playing for STORE_BLR_002."}
+    task = asyncio.create_task(play_demo_events(store_id))
+    active_demo_tasks[store_id] = task
+    return {"status": "success", "message": f"Demo playback started for {store_id}."}
+
+@app.post("/pos/demo/stop")
+async def pos_demo_stop():
+    """Stops the active simulated real-time event playback for STORE_BLR_002."""
+    store_id = "STORE_BLR_002"
+    if store_id in active_demo_tasks:
+        task = active_demo_tasks.pop(store_id)
+        task.cancel()
+        return {"status": "success", "message": f"Demo playback stopped for {store_id}."}
+    return {"status": "not_running", "message": "No active demo playing for STORE_BLR_002."}
+
 # Include Routers
 app.include_router(health_router)
 app.include_router(ingestion_router)
