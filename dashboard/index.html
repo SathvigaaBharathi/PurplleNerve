@@ -131,7 +131,7 @@
     // Polls /stores/{storeId}/cameras/{camId}/video_feed?t={timestamp} every
     // 80ms and paints each JPEG onto a <canvas> element. This is far more
     // reliable than MJPEG multipart streaming in Chromium-based browsers.
-    const CameraFeed = React.memo(({ storeId, camId, label, isActive, isSelected, onClick }) => {
+    const CameraFeed = React.memo(({ storeId, camId, label, isActive, isSelected, isDemoPlaying, onClick }) => {
       const canvasRef = useRef(null);
       const timerRef = useRef(null);
       const sizeSetRef = useRef(false);          // only resize canvas once
@@ -217,10 +217,17 @@
               position: 'absolute', inset: 0,
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
               color: 'rgba(255,255,255,0.3)', fontSize: '0.7rem', fontFamily: 'monospace',
-              background: 'rgba(0,0,0,0.8)'
+              background: 'rgba(0,0,0,0.85)', padding: '1rem', textAlign: 'center'
             }}>
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: '0.5rem' }}><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/></svg>
-              <span style={{ letterSpacing: '2px', fontWeight: 700, fontSize: '0.6rem' }}>CONNECTING...</span>
+              {isDemoPlaying ? (
+                <React.Fragment>
+                  <span style={{ letterSpacing: '1px', fontWeight: 700, fontSize: '0.65rem', color: '#ba75ff', marginBottom: '0.3rem' }}>DEMO PLAYBACK ACTIVE</span>
+                  <span style={{ fontSize: '0.52rem', color: '#9e8fae', maxWidth: '85%', lineHeight: '1.3' }}>Live camera streams suspended in cloud mode to conserve resources. Raw telemetry events active.</span>
+                </React.Fragment>
+              ) : (
+                <span style={{ letterSpacing: '2px', fontWeight: 700, fontSize: '0.6rem' }}>CONNECTING...</span>
+              )}
             </div>
           )}
           {/* Overlay: camera label + live badge + fps */}
@@ -311,8 +318,14 @@
           const action = isDemoPlaying ? 'stop' : 'start';
           const res = await fetch(`/stores/${storeId}/demo/${action}`, { method: 'POST' });
           const json = await res.json();
-          if (json.status === 'success') {
-            setIsDemoPlaying(!isDemoPlaying);
+          if (action === 'start') {
+            if (json.status === 'success' || json.status === 'already_running') {
+              setIsDemoPlaying(true);
+            }
+          } else {
+            if (json.status === 'success' || json.status === 'not_running') {
+              setIsDemoPlaying(false);
+            }
           }
         } catch (e) {
           console.error("Failed to toggle demo:", e);
@@ -1170,6 +1183,7 @@
                       label={cameraLabel(activeVideoCam) + ' [FOCUS]'}
                       isActive={activeCameras.includes(activeVideoCam)}
                       isSelected={true}
+                      isDemoPlaying={isDemoPlaying}
                       onClick={() => {}}
                     />
                   </div>
@@ -1184,6 +1198,7 @@
                         label={cam === "CAM_ENTRY_01" ? "Entry" : cam === "CAM_FLOOR_01" ? "Floor" : cam === "CAM_BILLING_01" ? "Billing" : cam === "CAM_FLOOR_02" ? "Makeup" : "Billing 2"}
                         isActive={activeCameras.includes(cam)}
                         isSelected={activeVideoCam === cam}
+                        isDemoPlaying={isDemoPlaying}
                         onClick={() => setActiveVideoCam(cam)}
                       />
                     ))}
